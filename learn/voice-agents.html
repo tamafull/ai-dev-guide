@@ -1,1 +1,88 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>音声AIエージェントを作る — AIを学ぶ</title><meta name="description" content="Realtime API、Speech-to-Speech、STT+LLM+TTSの音声Agent構成を説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Voice Agent</div><h1>音声AIは「文字起こしして返す」以外にも作り方がある</h1><p class="lead">音声Agentは、大きく分けて Speech-to-Speech、Realtimeセッション、STT→LLM→TTSのチェーン型があります。自然さ、低遅延、途中テキストの確認しやすさで構成を選びます。</p><section><h2>3つの考え方</h2><div class="table-wrap"><table><thead><tr><th>構成</th><th>向いている場面</th></tr></thead><tbody><tr><td>Realtime / Speech-to-Speech</td><td>自然な会話、割り込み、低遅延を重視</td></tr><tr><td>音声フロント＋別バックエンド</td><td>会話を続けながら強い別モデルや既存Agentへ仕事を委譲</td></tr><tr><td>STT→LLM→TTS</td><td>各段階を個別に差し替えたい、途中テキストを検査したい</td></tr></tbody></table></div></section><section><h2>最初の実装</h2><p>ブラウザならWebRTCでマイク音声をRealtime sessionへ送り、音声応答を受け取る構成から始められます。その後、検索やカレンダーなどのTool、割り込み、handoff、guardrailを足します。</p></section><section><h2>遅延だけで評価しない</h2><p>返事が速くても、Toolを間違えたり聞き取りに失敗したら使えません。音声Agentでは、聞き取り、会話の自然さ、Tool実行、最終的な外部状態まで分けてEvalsを作ります。</p></section><section><h2>AITuberとの違い</h2><p>AITuberでは音声Agentに、キャラクター表現、配信コメント、アバター制御、OBSなどが加わります。まず音声会話単体を安定させてから配信系を足すと分けて検証できます。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="aituber.html">AITuber</a></li><li><a href="evals.html">Evals</a></li><li><a href="https://developers.openai.com/api/docs/guides/voice-agents">OpenAI — Voice agents</a></li><li><a href="https://developers.openai.com/api/docs/guides/realtime">OpenAI — Realtime API</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>音声AIエージェントを作る — AIを学ぶ</title><meta name="description" content="ブラウザのマイクからRealtime APIへ接続し、音声応答まで完成させるVoice Agentハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Voice Agent</div><h1>ブラウザで話しかけると、そのまま音声で返すVoice Agentを作る</h1><p class="lead">音声AIはSTT→LLM→TTSだけではありません。Realtimeでは音声を直接扱い、割り込みやturn-takingを含む会話を1sessionで処理できます。このハンズオンでは、serverで短寿命client secretを発行し、browserからWebRTCでRealtime sessionへ接続します。</p><section><h2>完成するもの</h2><pre><code>voice-agent/
+├─ server.mjs        # API keyを保持しclient secretを発行
+├─ src/
+│  └─ main.ts        # RealtimeAgent / RealtimeSession
+├─ index.html
+└─ package.json
+</code></pre><p>Startボタンを押すとマイクが有効になり、話した内容へVoice Agentが音声で返答します。標準API keyはbrowserへ渡しません。</p></section><section><h2>1. Vite projectを作る</h2><pre><code>npm create vite@latest voice-agent -- --template vanilla-ts
+cd voice-agent
+npm install
+npm install @openai/agents zod openai express cors
+</code></pre><p>Node.jsは現行LTSを使ってください。</p></section><section><h2>2. serverでephemeral client secretを作る</h2><p><code>server.mjs</code>:</p><pre><code>import express from "express";
+import cors from "cors";
+import OpenAI from "openai";
+
+const app = express();
+app.use(cors({ origin: "http://localhost:5173" }));
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+app.get("/token", async (_req, res) =&gt; {
+  try {
+    const secret = await client.realtime.clientSecrets.create({
+      expires_after: { anchor: "created_at", seconds: 600 },
+      session: {
+        type: "realtime",
+        model: "gpt-realtime-2.1",
+        instructions: "日本語で簡潔に会話してください。聞き取れない時は推測せず聞き返してください。",
+      },
+    });
+
+    res.json({ value: secret.value, expires_at: secret.expires_at });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "failed to create client secret" });
+  }
+});
+
+app.listen(3001, () =&gt; console.log("token server: http://localhost:3001"));
+</code></pre><p>client secretはbrowser/mobile向けの短寿命credentialです。通常のAPI keyをfrontendへ埋め込まないでください。</p></section><section><h2>3. Browser側のAgentを書く</h2><p><code>src/main.ts</code>:</p><pre><code>import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
+import "./style.css";
+
+document.querySelector&lt;HTMLDivElement&gt;("#app")!.innerHTML = `
+  &lt;h1&gt;Voice Agent&lt;/h1&gt;
+  &lt;button id="start"&gt;Start&lt;/button&gt;
+  &lt;button id="stop" disabled&gt;Stop&lt;/button&gt;
+  &lt;p id="status"&gt;disconnected&lt;/p&gt;
+`;
+
+const status = document.querySelector&lt;HTMLParagraphElement&gt;("#status")!;
+const start = document.querySelector&lt;HTMLButtonElement&gt;("#start")!;
+const stop = document.querySelector&lt;HTMLButtonElement&gt;("#stop")!;
+
+const agent = new RealtimeAgent({
+  name: "Japanese Voice Assistant",
+  instructions: "日本語で自然に会話する。返答は短め。分からない時は聞き返す。",
+});
+
+let session: RealtimeSession | null = null;
+
+start.onclick = async () =&gt; {
+  status.textContent = "getting token...";
+  const token = await fetch("http://localhost:3001/token").then(r =&gt; r.json());
+
+  session = new RealtimeSession(agent, {
+    model: "gpt-realtime-2.1",
+  });
+
+  status.textContent = "connecting...";
+  await session.connect({ apiKey: token.value });
+  status.textContent = "connected — speak now";
+  start.disabled = true;
+  stop.disabled = false;
+};
+
+stop.onclick = () =&gt; {
+  session?.close();
+  session = null;
+  status.textContent = "disconnected";
+  start.disabled = false;
+  stop.disabled = true;
+};
+</code></pre><p>BrowserではRealtimeSessionがWebRTCを使い、マイク入力と音声再生を扱います。初回はbrowserのマイク権限確認が出ます。</p></section><section><h2>4. 起動する</h2><p>terminalを2つ開きます。</p><pre><code># terminal 1
+set OPENAI_API_KEY=...
+node server.mjs
+
+# terminal 2
+npm run dev
+</code></pre><p>ViteのURLを開き、Startを押して話します。音声応答が返れば最小Voice Agentは完成です。</p></section><section><h2>5. うまく動かない時</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>確認</th></tr></thead><tbody><tr><td>マイクが使えない</td><td>browser site permission、OS microphone permission、HTTPS/localhost条件。</td></tr><tr><td>401/403</td><td>server側API key、client secretの期限。</td></tr><tr><td>CORS error</td><td>ViteのoriginとserverのCORS設定。</td></tr><tr><td>音が返らない</td><td>browser autoplay/audio device、session接続状態。</td></tr><tr><td>古いRealtimeサンプルが動かない</td><td>beta APIではなくGAのclient_secrets / current SDKを使っているか。</td></tr></tbody></table></div></section><section><h2>6. Realtime / GPT-Live / chained pipelineを選ぶ</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>向く用途</th><th>特徴</th></tr></thead><tbody><tr><td>Realtime API</td><td>自然なspeech-to-speech</td><td>音声理解・reasoning・Toolを1sessionで扱う</td></tr><tr><td>GPT-Live</td><td>会話を止めず別backendへ仕事を委譲</td><td>voice frontとbackend reasoningを分離</td></tr><tr><td>STT→Agent→TTS</td><td>各段階を検査・差し替えたい</td><td>transcriptやpolicy checkを挟みやすい</td></tr></tbody></table></div><p>「一番新しい方式」を選ぶのではなく、会話自然さ、backend制御、途中textを検査したいかで選びます。</p></section><section><h2>7. Toolを追加する時はbusiness logicをserver側へ残す</h2><p>天気やカレンダーなどToolを足せますが、browserへcredentialや重要なbusiness ruleを置かないようにします。Voice Agentは「会話担当」、backendは「権限のある処理担当」と分離すると安全です。</p></section><section><h2>8. 割り込みを試す</h2><p>Agentが話している途中でユーザーが話し始め、正しくbarge-inできるか試します。音声Agentでは「返答内容が正しい」だけでなく、turn detectionやinterrupt behaviorが体験品質を大きく左右します。</p></section><section><h2>9. Voice Agentの評価項目</h2><ul class="checklist"><li>音声認識が意図を正しく取れたか。</li><li>初回音声までのlatency。</li><li>割り込みが成立するか。</li><li>Tool/delegationが正しいか。</li><li>backendの最終状態が正しいか。</li><li>Agentが結果をユーザーへ正しく伝えたか。</li></ul><p>自然な声で「予約できました」と言っても、実際の予約が失敗していたらtaskとしては失敗です。</p></section><section><h2>10. 本番へ進む前に</h2><ul class="checklist"><li>API keyはserver only。</li><li>client secretは短寿命。</li><li>個別ユーザーがいる場合はprivacy-preservingなsafety identifierを検討する。</li><li>Tool side effectにapproval/validationを入れる。</li><li>session終了、network断、再接続を扱う。</li><li>音声・transcriptの保存方針を明確にする。</li><li>latencyとcostを計測する。</li></ul></section><section><h2>11. 発展課題</h2><ul class="checklist"><li>天気などread-only Toolを1つ追加する。</li><li>conversation transcriptを画面にも表示する。</li><li>Realtime版とSTT→Agent→TTS版を作り、latencyを比較する。</li><li>GPT-Liveでbackend agentへdelegationする。</li><li>AITuberの音声部分をBrowser SpeechSynthesisからRealtimeへ置き換える。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://developers.openai.com/api/docs/guides/realtime">OpenAI — Realtime API getting started</a></li><li><a href="https://developers.openai.com/api/docs/guides/voice-agents">OpenAI — Voice agents</a></li><li><a href="https://openai.github.io/openai-agents-js/ja/guides/voice-agents/quickstart/">OpenAI Agents JS — Voice quickstart</a></li><li><a href="https://developers.openai.com/api/reference/resources/realtime/subresources/client_secrets/methods/create">Realtime client secrets</a></li><li><a href="aituber.html">AITuberを作る</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
