@@ -1,1 +1,97 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fine-tuningとLoRA — AIを学ぶ</title><meta name="description" content="Fine-tuning、PEFT、LoRAの違いと使いどころを説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Fine-tuning</div><h1>Fine-tuningは「知識を追加する」より「振る舞いを寄せる」用途から考える</h1><p class="lead">既存モデルを追加データで学習し直すのがFine-tuningです。LoRAなどのPEFTは、モデル全体ではなく小さな追加パラメータだけを学習し、必要な計算量と保存容量を減らします。</p><section><h2>何に向くか</h2><ul class="checklist"><li>決まった出力形式を安定させる。</li><li>特定の文体や分類ルールへ寄せる。</li><li>専門タスクの例を多数学習させる。</li></ul><p>頻繁に更新される事実を覚えさせるだけなら、RAGの方が更新しやすいことがあります。</p></section><section><h2>LoRAの直感</h2><p>巨大な重み行列そのものを全部更新せず、低ランクの小さな差分を追加して学習します。Hugging FaceのPEFTではLoRA、IA3、AdaLoRAなどを扱えます。</p></section><section><h2>最初にやること</h2><p>Fine-tuning前に、同じ評価セットで「Promptだけ」「RAG」「Fine-tuning」の3つを比較します。学習した結果だけ良く見えても、別の入力で崩れるなら意味がありません。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="rag.html">RAG</a></li><li><a href="evals.html">Evals</a></li><li><a href="https://huggingface.co/docs/transformers/main/peft">Hugging Face — PEFT</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fine-tuningとLoRA — AIを学ぶ</title><meta name="description" content="小型モデルへLoRAを適用し、学習前後を比較するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Fine-tuning / LoRA</div><h1>LoRAで小型モデルの振る舞いを変え、学習前後を比較する</h1><p class="lead">Fine-tuningはモデルの重みを追加学習します。LoRAは巨大な重み全体を書き換えず、小さな低ランク行列だけを学習することで必要メモリを抑えます。このページでは、小型のinstruction modelに独自の回答形式を覚えさせ、学習前後を同じ入力で比較します。</p><section><h2>完成するもの</h2><p>「質問に対して必ず <code>要点:</code> と <code>理由:</code> の2行で答える」という小さなデータセットを作り、LoRA adapterを学習します。目的は知識を追加することではなく、出力形式や振る舞いを寄せる感覚を掴むことです。</p></section><section><h2>前提</h2><p>GPU推奨です。0.5B級でもCPU学習はかなり遅くなります。VRAMが少ない場合はbatch sizeやsequence lengthを下げてください。</p><pre><code>python -m venv .venv
+.venv\Scripts\activate
+pip install torch transformers datasets peft accelerate
+</code></pre></section><section><h2>1. 小さな教師データを作る</h2><p><code>train.jsonl</code>:</p><pre><code>{"prompt":"HTTP 404とは？","answer":"要点: リクエスト先のリソースが見つからないことを示すHTTPステータスです。\n理由: サーバーは要求自体を受け取ったものの、指定されたURLに対応する資源を返せませんでした。"}
+{"prompt":"キャッシュの利点は？","answer":"要点: 再計算や再取得を減らし、応答時間と負荷を下げられます。\n理由: 一度得た結果を再利用できるため、同じ処理を毎回実行する必要がなくなります。"}
+{"prompt":"DBインデックスとは？","answer":"要点: 特定の列を使った検索を高速化するための補助データ構造です。\n理由: 全行を順番に調べず、目的の行へ効率よく到達できるようになります。"}
+</code></pre><p>実際には数十〜数千例を使います。3例は動作確認用です。</p></section><section><h2>2. 学習前の出力を保存する</h2><p><code>train_lora.py</code>:</p><pre><code>import json
+import torch
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+from peft import LoraConfig, get_peft_model
+
+MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+
+with open("train.jsonl", encoding="utf-8") as f:
+    rows = [json.loads(line) for line in f]
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL,
+    torch_dtype="auto",
+    device_map="auto",
+)
+
+TEST = "DNSとは？"
+
+def generate(m, prompt):
+    messages = [{"role": "user", "content": prompt}]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(m.device)
+    with torch.no_grad():
+        out = m.generate(**inputs, max_new_tokens=100, do_sample=False)
+    generated = out[0][inputs.input_ids.shape[1]:]
+    return tokenizer.decode(generated, skip_special_tokens=True)
+
+print("BEFORE:\n", generate(model, TEST))
+</code></pre><p>まずここまで実行して学習前の結果を記録します。</p></section><section><h2>3. LoRA adapterを追加する</h2><p>同じファイルへ続けます。</p><pre><code>lora = LoraConfig(
+    r=8,
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+    task_type="CAUSAL_LM",
+)
+model = get_peft_model(model, lora)
+model.print_trainable_parameters()
+</code></pre><p>出力されるtrainable parameter比率を見ると、全パラメータではなく一部だけが学習対象になっていることを確認できます。</p></section><section><h2>4. Chat形式に変換してtokenizeする</h2><pre><code>def format_row(row):
+    messages = [
+        {"role": "user", "content": row["prompt"]},
+        {"role": "assistant", "content": row["answer"]},
+    ]
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+def tokenize(batch):
+    return tokenizer(
+        batch["text"],
+        truncation=True,
+        max_length=256,
+    )
+
+ds = Dataset.from_list([{"text": format_row(r)} for r in rows])
+ds = ds.map(tokenize, batched=True, remove_columns=["text"])
+</code></pre></section><section><h2>5. 学習する</h2><pre><code>args = TrainingArguments(
+    output_dir="out",
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=4,
+    num_train_epochs=8,
+    learning_rate=2e-4,
+    logging_steps=1,
+    save_strategy="no",
+    report_to="none",
+)
+
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=ds,
+    data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
+)
+
+trainer.train()
+model.save_pretrained("adapter")
+print("AFTER:\n", generate(model, TEST))
+</code></pre><p>3件だけだと過学習しやすく、未知質問への一般化も弱いです。この例ではまず「adapterを学習し、形式が寄る」ことを確認します。</p></section><section><h2>6. 本当に改善したかは学習データ外で測る</h2><p>次のような評価セットを別ファイルにします。</p><pre><code>eval_prompts = [
+    "TLSとは？",
+    "ロードバランサの役割は？",
+    "トランザクションとは？",
+    "メッセージキューの用途は？",
+]
+
+for p in eval_prompts:
+    print("Q:", p)
+    print(generate(model, p))
+</code></pre><p>「要点:」「理由:」が出る割合、内容の正しさ、余計な文章の有無を学習前後で比較します。学習データと同じ問題だけで評価すると、単なる暗記と区別できません。</p></section><section><h2>7. LoRAで知識を入れるべきか</h2><p>頻繁に変わる社内規定や最新製品仕様を覚えさせたいだけなら、RAGの方が更新・出典確認しやすいことがあります。Fine-tuningは次のような用途で検討しやすいです。</p><ul class="checklist"><li>特定の出力形式を安定させる。</li><li>分類や抽出の判断パターンを大量例から学習させる。</li><li>専門的なタスクの振る舞いを寄せる。</li><li>短いpromptでも一定の挙動を出したい。</li></ul></section><section><h2>8. よくある失敗</h2><div class="table-wrap"><table><thead><tr><th>失敗</th><th>原因・対策</th></tr></thead><tbody><tr><td>train lossだけ良くなる</td><td>holdout評価を作る。データ重複を除く。</td></tr><tr><td>同じ文言ばかり返す</td><td>例の多様性不足。少数データの過学習を疑う。</td></tr><tr><td>元の能力が落ちる</td><td>learning rate、epoch、LoRA rankを下げる。用途別評価を増やす。</td></tr><tr><td>OOM</td><td>小さいモデル、短いsequence、batch 1、quantized base modelを検討する。</td></tr><tr><td>adapterを読み込んでも変化しない</td><td>base modelとadapterの組み合わせ、target_modules、chat templateを確認する。</td></tr></tbody></table></div></section><section><h2>9. 次に試す</h2><ul class="checklist"><li>50〜200例へ増やし、20例をholdoutにする。</li><li>Prompt only / RAG / LoRAを同じ評価セットで比較する。</li><li>学習データの品質を変えて性能差を見る。</li><li>4bit base model + QLoRAを試し、VRAM使用量を測る。</li><li>adapterをmergeした場合と分離した場合の配布サイズを比べる。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://huggingface.co/docs/transformers/main/training">Hugging Face — Fine-tuning</a></li><li><a href="https://huggingface.co/docs/peft/">Hugging Face PEFT</a></li><li><a href="https://arxiv.org/abs/2106.09685">LoRA: Low-Rank Adaptation of Large Language Models</a></li><li><a href="rag.html">RAGハンズオン</a></li><li><a href="evals.html">Evalsハンズオン</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
