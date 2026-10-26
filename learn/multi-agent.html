@@ -1,1 +1,102 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multi-Agentとは — AIを学ぶ</title><meta name="description" content="複数AIエージェントを使う利点と難しさを説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Multi-Agent</div><h1>Multi-Agentは「AIを増やす」だけではなく、仕事をどう分割するかの設計</h1><p class="lead">複数エージェントを同時に動かすと、探索や比較を並列化できます。一方で、情報共有、競合、重複作業、統合コストが増えるため、単一Agentより常に優れるわけではありません。</p><section><h2>向いている分割</h2><ul class="checklist"><li>別々の情報源を調べる。</li><li>複数案を独立に考える。</li><li>実装とは別にレビュー役を置く。</li><li>大きな探索空間を並列に調べる。</li></ul></section><section><h2>向いていない分割</h2><p>同じファイルを複数Agentが編集する、前のAgentの判断を次が毎回待つ、全員が同じ調査をする、といった構成では並列化の利点が消えます。</p></section><section><h2>Coordinatorの役割</h2><p>主AgentやCoordinatorは、Goal、担当範囲、共有状態、最終統合を持ちます。探索は並列、書き換えや最終判断は集約、という形が扱いやすいことがあります。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="ai-agents.html">AI Agent</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="../agents.html">実務ガイド: エージェント構成</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multi-Agentを作って比較する — AIを学ぶ</title><meta name="description" content="Agents as toolsで複数Agentを組み、単一Agentと品質・時間・重複を比較するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Multi-Agent</div><h1>複数Agentに分ける前に、単一Agentより本当に得か測る</h1><p class="lead">Multi-AgentはAgentを増やすこと自体が目的ではありません。独立した探索を分け、最後の統合責任を明確にするための設計です。このページでは「顧客会議の準備」を単一Agent版とManager＋2 Specialist版で実行し、時間・Tool呼び出し・出力の抜けを比較します。</p><section><h2>完成する構成</h2><pre><code>               ┌─ customer specialist
+user → manager ┤
+               └─ risk specialist
+                        ↓
+                  managerが統合
+</code></pre><p>Specialistは最終回答を直接返さず、ManagerからToolとして呼ばれます。OpenAI Agents SDKでいう <em>agents as tools</em> パターンです。</p></section><section><h2>1. 環境</h2><pre><code>pip install openai-agents
+set OPENAI_API_KEY=...
+</code></pre></section><section><h2>2. Specialistを作る</h2><p><code>multi.py</code>:</p><pre><code>import time
+from agents import Agent, Runner
+
+customer_agent = Agent(
+    name="Customer specialist",
+    instructions="""
+顧客メモを読み、顧客の要望、期限、未解決事項だけを抽出する。
+推測を足さない。
+""",
+)
+
+risk_agent = Agent(
+    name="Risk specialist",
+    instructions="""
+与えられた情報から、技術リスク、運用リスク、確認が必要な点を抽出する。
+事実と推測を分ける。
+""",
+)
+</code></pre></section><section><h2>3. ManagerへAgentをToolとして渡す</h2><pre><code>manager = Agent(
+    name="Meeting manager",
+    instructions="""
+顧客会議のブリーフを作る。
+必要ならspecialistを使う。
+最終出力は 目的 / 顧客要望 / 現状 / リスク / 質問 の順。
+同じ内容を重複させない。
+""",
+    tools=[
+        customer_agent.as_tool(
+            tool_name="analyze_customer",
+            tool_description="顧客要望・期限・未解決事項を抽出する",
+        ),
+        risk_agent.as_tool(
+            tool_name="analyze_risks",
+            tool_description="技術・運用リスクと確認事項を抽出する",
+        ),
+    ],
+)
+</code></pre></section><section><h2>4. 単一Agentも用意する</h2><pre><code>single = Agent(
+    name="Single meeting agent",
+    instructions="""
+顧客会議のブリーフを作る。
+目的 / 顧客要望 / 現状 / リスク / 質問 の順で整理し、推測は明示する。
+""",
+)
+
+INPUT = """
+顧客Acme。契約更新は11月末。
+CSV exportは現在8分で、顧客目標は2分以内。
+11月第2週にstaging予定。
+10/18にexport worker遅延。原因はqueue backlog。
+worker scalingとquery見直しが恒久対策候補。
+"""
+
+
+def run(agent):
+    start = time.perf_counter()
+    result = Runner.run_sync(agent, INPUT)
+    elapsed = time.perf_counter() - start
+    return result.final_output, elapsed
+
+for name, agent in [("single", single), ("multi", manager)]:
+    text, sec = run(agent)
+    print("\n===", name, f"{sec:.2f}s ===")
+    print(text)
+</code></pre><p>Multi-Agentは呼び出しが増えるため、普通はlatencyとtoken消費も増えます。出力が少し良いだけなら割に合わない可能性があります。</p></section><section><h2>5. 「良かった気がする」をやめて採点する</h2><p>最低限のrubricを作ります。</p><pre><code>CHECKS = [
+    "11月末",
+    "8分",
+    "2分",
+    "11月第2週",
+    "queue backlog",
+]
+
+
+def score(text):
+    return sum(x in text for x in CHECKS) / len(CHECKS)
+</code></pre><p>同じ入力を5回ずつ流し、平均score、平均時間、失敗例を記録します。Multi-Agentは非決定的なroutingも増えるため、1回だけの比較では判断しません。</p></section><section><h2>6. Multi-Agentが効く分割</h2><p>並列化しやすいのは、互いの途中結果を待たずに進められる仕事です。</p><ul class="checklist"><li>別々の情報源を探索する。</li><li>複数案を独立に作る。</li><li>実装と独立reviewを分ける。</li><li>セキュリティ・性能・互換性など観点を分ける。</li></ul><p>一方、「設計Agent→実装Agent→テストAgent」のように直列依存するだけなら、Agentを分けるほどhandoffで情報が落ちることがあります。</p></section><section><h2>7. HandoffとAgents as toolsを使い分ける</h2><div class="table-wrap"><table><thead><tr><th>方式</th><th>誰が最終回答を持つか</th><th>向くケース</th></tr></thead><tbody><tr><td>Agents as tools</td><td>Manager</td><td>専門家の結果を統合したい</td></tr><tr><td>Handoff</td><td>移譲先Agent</td><td>専門家へ会話自体を引き継ぎたい</td></tr></tbody></table></div><p>「旅行調査Agent」「価格調査Agent」の結果を1つの提案へ統合するならManager型、問い合わせを「技術窓口」「請求窓口」へそのまま振り分けるならhandoffが自然です。</p></section><section><h2>8. 本当に並列化する</h2><p>LLMにroutingさせず、独立作業だと分かっているならPython側で並列実行できます。</p><pre><code>import asyncio
+from agents import Runner
+
+async def gather():
+    a, b = await asyncio.gather(
+        Runner.run(customer_agent, INPUT),
+        Runner.run(risk_agent, INPUT),
+    )
+    return a.final_output, b.final_output
+
+customer_result, risk_result = asyncio.run(gather())
+</code></pre><p>その2結果だけをManagerへ渡せば、探索は並列、統合は一箇所にできます。固定workflowなら、すべてをLLM routingに任せる必要はありません。</p></section><section><h2>9. 共有状態を決める</h2><p>複数Agentがファイルを編集する場合、メッセージだけで協調させると競合します。少なくとも担当範囲、完了状態、編集権、決定事項を共有します。</p><pre><code>{
+  "tasks": {
+    "api": {"owner":"agent-a", "status":"doing"},
+    "tests": {"owner":"agent-b", "status":"todo"}
+  },
+  "locked_files": ["schema.sql"],
+  "decisions": ["public APIは変更しない"]
+}
+</code></pre></section><section><h2>10. 比較すべきコスト</h2><p>Multi-Agentの評価ではモデルAPI料金だけでなく、統合失敗や重複も含めます。</p><ul class="checklist"><li>task success rate</li><li>wall-clock time</li><li>総token / API費用</li><li>同じ情報を重複調査した回数</li><li>統合時に矛盾した回答数</li><li>人間のreview時間</li></ul></section><section><h2>11. 発展課題</h2><ul class="checklist"><li>customer/risk/performanceの3Agentへ増やす。</li><li>singleとmultiを20ケースで比較する。</li><li>Agentを増やすほど品質がどこで頭打ちになるか測る。</li><li>並列探索だけmultiにし、ファイル書き換えはManagerだけに限定する。</li><li>specialistの結果に根拠URLやfile pathを必須にする。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://openai.github.io/openai-agents-python/multi_agent/">OpenAI Agents SDK — Agent orchestration</a></li><li><a href="https://openai.github.io/openai-agents-python/tools/">Agents as tools</a></li><li><a href="../agents.html">実務ガイド: エージェント構成</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="mcp.html">次: MCP →</a></footer></main></body></html>
