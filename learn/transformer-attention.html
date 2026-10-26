@@ -1,1 +1,63 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TransformerとAttention — AIを学ぶ</title><meta name="description" content="TransformerとAttentionが文章中の関係をどう扱うかを直感的に説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Transformer</div><h1>Attentionは「今のtokenが、どのtokenをどれだけ見るか」を計算する</h1><p class="lead">Transformerの中心はSelf-Attentionです。文章全体を同じ重みで混ぜるのではなく、各tokenが他のtokenとの関係に応じて情報を取り込みます。</p><section><h2>直感</h2><p>「彼は銀行でお金を下ろした」の「銀行」は、周囲の「お金」「下ろした」と強く関係します。Attentionは、現在の位置が文中のどこを重視すべきかを学習します。</p></section><section><h2>Q・K・Vは何か</h2><p>各tokenからQuery、Key、Valueという3種類のベクトルを作ります。QueryとKeyの相性から重みを出し、その重みでValueを混ぜます。Multi-Head Attentionではこの見方を複数並行させ、異なる関係を拾います。</p></section><section><h2>TransformerはAttentionだけではない</h2><p>位置情報、Feed Forward層、残差接続、正規化などを重ねて深いネットワークにします。LLMではこれを大量の層とパラメータへ拡張します。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="tokenizers-embeddings.html">TokenizerとEmbedding</a></li><li><a href="build-small-llm.html">小さなLLMを作る</a></li><li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/1">Hugging Face LLM Course</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TransformerとAttention — AIを学ぶ</title><meta name="description" content="Scaled dot-product attentionを実装し、Attention weightを観察しながらTransformerを理解するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Transformer</div><h1>Attentionを自分で計算すると、Transformerの中心が見える</h1><p class="lead">Self-Attentionは、各tokenが他のtokenをどれだけ参照するかを重みとして計算します。このページではNumPyでScaled Dot-Product Attentionを実装し、重み行列を実際に表示して「どこを見ているか」を確認します。</p><section><h2>完成するもの</h2><p>4個のtokenベクトルに対してQ/K/Vを作り、Attention score、softmax後のweight、出力ベクトルを計算します。最後にcausal maskを追加し、未来tokenを見られない状態も再現します。</p></section><section><h2>1. 環境</h2><pre><code>python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # macOS/Linux
+pip install numpy
+</code></pre></section><section><h2>2. 最小Attentionを実装する</h2><p><code>attention.py</code> を作ります。</p><pre><code>import numpy as np
+
+np.set_printoptions(precision=3, suppress=True)
+rng = np.random.default_rng(42)
+
+# 4 tokens x 4 dimensions
+X = np.array([
+    [1.0, 0.0, 0.0, 0.0],
+    [0.8, 0.2, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.8, 0.2],
+])
+
+Wq = rng.normal(size=(4, 4)) / 2
+Wk = rng.normal(size=(4, 4)) / 2
+Wv = rng.normal(size=(4, 4)) / 2
+
+Q = X @ Wq
+K = X @ Wk
+V = X @ Wv
+
+scores = Q @ K.T / np.sqrt(K.shape[-1])
+
+# stable softmax
+scores_shifted = scores - scores.max(axis=-1, keepdims=True)
+weights = np.exp(scores_shifted)
+weights = weights / weights.sum(axis=-1, keepdims=True)
+
+out = weights @ V
+
+print("scores\n", scores)
+print("weights\n", weights)
+print("row sums", weights.sum(axis=-1))
+print("output\n", out)
+</code></pre><p>実行します。</p><pre><code>python attention.py
+</code></pre><p><code>weights</code> の各行は合計1になります。行0は「token 0が、token 0〜3をそれぞれ何割参照するか」を表します。</p></section><section><h2>3. Q・K・Vを式ではなく役割で見る</h2><div class="table-wrap"><table><thead><tr><th>名前</th><th>役割</th></tr></thead><tbody><tr><td>Query</td><td>今のtokenが「どんな情報を探しているか」を表すベクトル。</td></tr><tr><td>Key</td><td>各tokenが「自分はどんな情報を持っているか」を照合するためのベクトル。</td></tr><tr><td>Value</td><td>参照すると決まったあと、実際に混ぜ込む情報。</td></tr></tbody></table></div><p><code>Q @ K.T</code> が相性の表、softmaxが参照割合、<code>weights @ V</code> が参照した情報の合成です。Q/K/Vは学習によって決まる重み行列から作られます。</p></section><section><h2>4. なぜ √d で割るのか</h2><p>次元数が大きくなるほどdot productの絶対値も大きくなりやすく、そのままsoftmaxへ入れると一部の要素だけが極端に1へ近づきやすくなります。元論文のScaled Dot-Product Attentionでは、keyの次元 <code>d_k</code> の平方根で割ってスケールを安定させます。</p><p>試しに <code>/ np.sqrt(...)</code> を消してweightを比較すると、softmaxが尖りやすくなる様子を確認できます。</p></section><section><h2>5. causal maskを入れる</h2><p>文章生成モデルでは、位置2のtokenが位置3の「未来」を見てはいけません。次をsoftmax前に追加します。</p><pre><code>n = scores.shape[0]
+future = np.triu(np.ones((n, n), dtype=bool), k=1)
+masked_scores = scores.copy()
+masked_scores[future] = -np.inf
+
+m = masked_scores - np.max(masked_scores, axis=-1, keepdims=True)
+masked_weights = np.exp(m)
+masked_weights = masked_weights / masked_weights.sum(axis=-1, keepdims=True)
+
+print("causal weights\n", masked_weights)
+</code></pre><p>右上三角のweightが0になります。これが「過去までしか見ない」causal attentionです。</p></section><section><h2>6. Self-Attentionの弱点も観察する</h2><p>通常のAttention score行列はtoken数 <code>n</code> に対して <code>n × n</code> です。文章が2倍になるとscore要素数は約4倍になります。長いコンテキストでメモリと計算量が問題になる理由の1つです。</p><pre><code>for n in [1024, 4096, 16384, 65536]:
+    cells = n * n
+    fp16_gib = cells * 2 / (1024 ** 3)
+    print(n, f"{cells:,} cells", f"{fp16_gib:.2f} GiB / head")
+</code></pre><p>実際の実装ではFlashAttention、KV cache、GQA、sliding/windowed attentionなど様々な最適化が使われます。ここではまず「素朴なAttentionは二次的に増える」と確認できれば十分です。</p></section><section><h2>7. Multi-Head Attentionは何を増やすのか</h2><p>1組のQ/K/Vだけで全関係を表すのではなく、ベクトル次元を複数headへ分け、それぞれ別のQ/K/V変換を学習します。あるheadは近距離の構文、別のheadは遠距離の参照、と役割が分かれる可能性があります。ただし「このheadは必ず主語を担当する」のように固定ルールで解釈できるわけではありません。</p></section><section><h2>8. PyTorchの実装と対応させる</h2><pre><code>import torch
+from torch.nn.functional import scaled_dot_product_attention
+
+q = torch.tensor(Q, dtype=torch.float32)[None, None, :, :]
+k = torch.tensor(K, dtype=torch.float32)[None, None, :, :]
+v = torch.tensor(V, dtype=torch.float32)[None, None, :, :]
+
+result = scaled_dot_product_attention(q, k, v, is_causal=True)
+print(result.shape)
+</code></pre><p>実務では最適化された実装を使いますが、内部で必要な概念は先ほどのQ/K/V、score、mask、softmax、weighted sumです。</p></section><section><h2>9. 自分で試す課題</h2><ul class="checklist"><li>Xのtoken 0と1を完全に同じベクトルにし、weightがどう変わるか見る。</li><li>√dスケーリング有無でentropyを比較する。</li><li>causal maskとmaskなしの出力差を計算する。</li><li>headを2つに分けた簡易Multi-Head Attentionを実装する。</li><li><a href="build-small-llm.html">小さなLLM</a>のTransformerを1層だけにして生成品質を比較する。</li></ul></section><section><h2>原典・追加資料</h2><ul class="checklist"><li><a href="https://arxiv.org/abs/1706.03762">Vaswani et al. — Attention Is All You Need</a></li><li><a href="https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html">PyTorch — scaled_dot_product_attention</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/4">Hugging Face LLM Course — Transformers</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="tokenizers-embeddings.html">次: TokenizerとEmbedding →</a></footer></main></body></html>
