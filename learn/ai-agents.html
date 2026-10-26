@@ -1,1 +1,65 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Agentとは — AIを学ぶ</title><meta name="description" content="LLMにツール、状態、ループを加えたAI Agentの基本構成を説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · AI Agent</div><h1>AI Agentは、LLMに「行動する手足」と「続ける仕組み」を足したもの</h1><p class="lead">普通のLLM呼び出しは入力→出力で終わります。Agentは、必要なツールを選び、外部情報を取得し、操作し、結果を見て次の行動を決めます。</p><section><h2>基本部品</h2><ul class="checklist"><li>LLM: 判断と文章生成。</li><li>Tools: 検索、API、コード実行、ファイル操作など。</li><li>State: 途中経過や会話状態。</li><li>Loop: 行動→観察→次の行動。</li><li>Guardrails: 権限、停止条件、承認。</li><li>Evals / tracing: うまく動いたかを測る仕組み。</li></ul></section><section><h2>例</h2><p>「今週の会議を準備して」というAgentなら、Calendarを読む→参加者を確認→Gmailから関連メールを探す→要点を整理→不足情報を表示、まで複数ステップで進みます。</p></section><section><h2>Agentにしない方がいい場合</h2><p>単純な変換や一回の質問ならAgent化すると遅く、複雑になります。決定論的に書ける処理は普通のコードやスクリプトを使い、判断や探索が必要な部分だけLLMへ残します。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="multi-agent.html">Multi-Agent</a></li><li><a href="mcp.html">MCP</a></li><li><a href="https://developers.openai.com/learn/agents">OpenAI — Agents</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Agentを作る — AIを学ぶ</title><meta name="description" content="OpenAI Agents SDKで、ローカル資料を必要に応じて読むツール利用Agentを作るハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · AI Agent</div><h1>ツールを使って資料を探し、答えまで組み立てるAgentを作る</h1><p class="lead">Agentは「LLMを何度も呼ぶもの」ではなく、モデルが状況に応じてToolを選び、結果を観察し、必要なら次のToolへ進む実行系です。このハンズオンでは、ローカルのメモ群を必要な時だけ読み、会議ブリーフを作るAgentを実装します。</p><section><h2>完成するもの</h2><pre><code>agent-demo/
+├─ notes/
+│  ├─ customer.md
+│  ├─ roadmap.md
+│  └─ incidents.md
+└─ app.py
+</code></pre><p>ユーザーが「Acmeとの会議準備をして」と頼むと、Agentがまず利用可能なメモを確認し、必要なファイルだけ読み、目的・論点・リスク・確認事項をまとめます。</p></section><section><h2>1. 環境</h2><pre><code>python -m venv .venv
+.venv\Scripts\activate
+pip install openai-agents
+set OPENAI_API_KEY=...
+</code></pre><p>OpenAI Agents SDKは、Agent、Tool、handoff、guardrail、session、tracingなどの実行基盤を提供します。</p></section><section><h2>2. 資料を作る</h2><p><code>notes/customer.md</code>:</p><pre><code># Acme
+- 契約更新: 11月末
+- 最重要要望: CSV export高速化
+- 前回会議: 現状8分、目標2分以内
+</code></pre><p><code>notes/roadmap.md</code>:</p><pre><code># Roadmap
+- CSV export改善: 11月第2週にstaging予定
+- API v2: 12月preview
+</code></pre><p><code>notes/incidents.md</code>:</p><pre><code># Incidents
+- 10/18: export worker遅延。原因はqueue backlog。
+- 恒久対策はworker scalingとquery見直し。
+</code></pre></section><section><h2>3. Toolを作る</h2><p><code>app.py</code>:</p><pre><code>from pathlib import Path
+from agents import Agent, Runner
+from agents.decorators import tool
+
+NOTES = Path("notes")
+
+
+@tool
+def list_notes() -&gt; list[str]:
+    """List available note filenames."""
+    return [p.name for p in NOTES.glob("*.md")]
+
+
+@tool
+def read_note(filename: str) -&gt; str:
+    """Read one note file. filename must be a basename returned by list_notes."""
+    path = NOTES / filename
+    if path.parent != NOTES or not path.exists() or path.suffix != ".md":
+        return "ERROR: invalid filename"
+    return path.read_text(encoding="utf-8")
+</code></pre><p>Toolはなるべく小さく、入力・出力を明確にします。「任意shellを実行」のような巨大Toolより、用途が分かるToolの方が権限も絞れます。</p></section><section><h2>4. Agentを定義する</h2><pre><code>agent = Agent(
+    name="Meeting Prep",
+    instructions="""
+あなたは会議準備担当です。
+必要な資料だけToolで確認し、推測で不足を埋めないでください。
+出力は次の順:
+1. 会議の目的
+2. 現状
+3. 論点
+4. リスク
+5. 相手へ確認する質問
+最後に参照したファイル名を書く。
+""",
+    tools=[list_notes, read_note],
+)
+
+
+if __name__ == "__main__":
+    result = Runner.run_sync(
+        agent,
+        "Acmeとの契約更新前の会議準備をして。CSV exportの状況も確認したい。",
+    )
+    print(result.final_output)
+</code></pre><pre><code>python app.py
+</code></pre><p>Agentは必要に応じて <code>list_notes</code>、<code>read_note</code> を呼びます。普通の1回のLLM呼び出しとの違いは、資料内容をpromptへ最初から全部詰めず、モデルが作業途中に外部能力を使えることです。</p></section><section><h2>5. Toolを使ったか確認する</h2><p>Agentは結果が自然でも、必要な資料を実際に読んだとは限りません。SDKのtraceを確認し、Tool callと引数、結果、handoffなど実行履歴を見ます。</p><p>評価では最終文章だけでなく、次も確認します。</p><ul class="checklist"><li>customer.mdを読んだか。</li><li>roadmap.mdまたはincidents.mdを必要に応じて読んだか。</li><li>存在しない資料を参照していないか。</li><li>不要な全ファイル読み込みをしていないか。</li></ul></section><section><h2>6. 「Agentにする意味」があるか確認する</h2><p>もし毎回必ず3ファイルを読むだけなら、Pythonコードで3ファイルを読み、1回LLMへ渡す方が単純です。Agent化が有効なのは、入力ごとに次の行動が変わる場合です。</p><div class="table-wrap"><table><thead><tr><th>処理</th><th>普通のコード</th><th>Agent</th></tr></thead><tbody><tr><td>決まった3ファイルを読む</td><td>向く</td><td>不要</td></tr><tr><td>質問に応じて資料を選ぶ</td><td>ルールが複雑なら難しい</td><td>向く</td></tr><tr><td>外部結果を見て次の検索を変える</td><td>状態機械で実装可能</td><td>探索が曖昧なら向く</td></tr><tr><td>送金・削除</td><td>決定論＋承認が基本</td><td>判断補助だけに留める</td></tr></tbody></table></div></section><section><h2>7. 書き込みToolを足すなら承認境界を作る</h2><p><code>read_note</code> は読み取りですが、メール送信やファイル削除は副作用があります。AgentへToolを渡す時は「使えるか」ではなく「どこまで自動実行してよいか」を分けます。</p><p>Agents SDKにはTool guardrailやhuman-in-the-loopの仕組みがあります。機密操作は、Tool呼び出し前に入力検証し、必要なら実行を一時停止して人の承認を待つ構成にします。</p></section><section><h2>8. 状態を持たせる</h2><p>会話を複数turn続ける場合、<code>result.to_input_list()</code> を次のRunnerへ渡す方法、sessionを使う方法、server-managed stateを使う方法があります。何でも会話履歴へ残すのではなく、長期状態は構造化ファイルやDBへ分離すると扱いやすくなります。</p></section><section><h2>9. Agentの失敗パターン</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>対策</th></tr></thead><tbody><tr><td>Toolを使わず推測する</td><td>資料依存の質問をevalへ入れ、Tool usageを検証する。</td></tr><tr><td>全Toolを毎回呼ぶ</td><td>Tool説明を具体化し、必要ならTool search /遅延ロード。</td></tr><tr><td>同じToolをループ</td><td>max turns、同一失敗検出、stop criteria。</td></tr><tr><td>危険操作を勝手に実行</td><td>読み書き分離、approval、guardrail、sandbox。</td></tr><tr><td>最後の文章は正しいが外部状態が違う</td><td>Tool結果・DB状態まで評価する。</td></tr></tbody></table></div></section><section><h2>10. 次に改造する</h2><ul class="checklist"><li>検索Toolを追加して、ファイル数を100件へ増やす。</li><li>会議ブリーフをファイル保存するToolを追加し、保存前だけ承認させる。</li><li>同じ5タスクで「全資料をpromptへ入れる方式」とAgent方式を比較する。</li><li>traceからTool回数、latency、token使用量を記録する。</li><li>次のMulti-Agent記事で、調査役を別Agentへ分離する。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://openai.github.io/openai-agents-python/">OpenAI Agents SDK</a></li><li><a href="https://openai.github.io/openai-agents-python/quickstart/">Agents SDK Quickstart</a></li><li><a href="https://openai.github.io/openai-agents-python/guardrails/">Guardrails</a></li><li><a href="https://openai.github.io/openai-agents-python/human_in_the_loop/">Human in the loop</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="multi-agent.html">次: Multi-Agent →</a></footer></main></body></html>
