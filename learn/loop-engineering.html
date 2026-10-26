@@ -1,1 +1,135 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loop Engineeringとは — AIを学ぶ</title><meta name="description" content="Loop Engineeringを、AI Agentの行動・観察・修正ループの設計として説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Loop Engineering</div><h1>Loop Engineeringは、AIが「試す→見る→直す」を繰り返す仕組みを設計する</h1><p class="lead">Promptを一度工夫して終わりではなく、AIが行動し、結果を観察し、必要なら修正してまた試す反復そのものを設計する考え方です。2026年にはIBMもこの語を、agentic workflowのループ設計を表す言葉として紹介しています。</p><section><h2>最小のループ</h2><ol><li>Goalを読む。</li><li>次の行動を決める。</li><li>ツールやコードを実行する。</li><li>結果を観察する。</li><li>成功条件と比較する。</li><li>未達なら方針を修正して続ける。</li></ol></section><section><h2>Loop Engineeringで決めるもの</h2><ul class="checklist"><li>いつ再試行するか。</li><li>何回失敗したら止まるか。</li><li>どの結果を「成功」と判定するか。</li><li>どの操作は人間承認が必要か。</li><li>状態をどこへ残すか。</li><li>失敗から何を次の入力へ戻すか。</li></ul></section><section><h2>例</h2><p>コード修正なら「実装→テスト→失敗ログを読む→修正→再テスト」がループです。調査なら「仮説→検索→証拠比較→不足点を再検索」がループになります。AITuberなら「発話→視聴者反応→会話状態更新→次の発話」もループです。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="ai-agents.html">AI Agent</a></li><li><a href="evals.html">Evals</a></li><li><a href="https://www.ibm.com/think/topics/loop-engineering">IBM — What is Loop Engineering?</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loop Engineering実践 — AIを学ぶ</title><meta name="description" content="AIが実装、観察、検証、修正、停止を繰り返すループを実際に作るハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Loop Engineering</div><h1>「AIに頼む」から、「失敗を見て自分で直すループ」を設計する</h1><p class="lead">Loop Engineeringは、Agentが action → observation → validation → retry を繰り返し、成功条件を満たしたら止まる仕組みを設計する考え方です。ここでは、バグのあるPython関数をAIが修正し、pytestが通るまで最大3回だけ再試行する小さな修復ループを作ります。</p><section><h2>完成するもの</h2><pre><code>loop-lab/
+├─ calc.py
+├─ test_calc.py
+└─ repair_loop.py
+</code></pre><p>AIへ「直して」と1回だけ頼むのではなく、実際のtest結果を観察として戻し、成功条件をpytestに固定します。最大試行回数、変更禁止、バックアップもコード側で管理します。</p></section><section><h2>1. 壊れたコードとtestを用意する</h2><p><code>calc.py</code>:</p><pre><code>def divide(a, b):
+    return a // b
+</code></pre><p><code>test_calc.py</code>:</p><pre><code>import pytest
+from calc import divide
+
+
+def test_normal():
+    assert divide(5, 2) == 2.5
+
+
+def test_zero():
+    with pytest.raises(ZeroDivisionError):
+        divide(1, 0)
+
+
+def test_negative():
+    assert divide(-3, 2) == -1.5
+</code></pre><pre><code>pip install pytest openai
+pytest -q
+</code></pre><p>最初は失敗します。</p></section><section><h2>2. ループの状態遷移を先に決める</h2><pre><code>START
+  ↓
+run tests
+  ├─ pass → DONE
+  └─ fail
+       ↓
+   collect source + failure log
+       ↓
+   ask model for candidate
+       ↓
+   validate candidate format
+       ↓
+   write candidate
+       ↓
+   run tests again
+       ├─ pass → DONE
+       └─ fail → retry until max_attempts
+</code></pre><p>「何度か頑張って」ではなく、<strong>観察、成功判定、再試行、停止</strong>をコードにします。</p></section><section><h2>3. repair loopを実装する</h2><p><code>repair_loop.py</code>:</p><pre><code>import os
+import shutil
+import subprocess
+from pathlib import Path
+from openai import OpenAI
+
+MODEL = os.getenv("OPENAI_MODEL", "gpt-6-astra")
+MAX_ATTEMPTS = 3
+TARGET = Path("calc.py")
+BACKUP = Path("calc.py.bak")
+client = OpenAI()
+
+
+def run_tests():
+    p = subprocess.run(
+        ["pytest", "-q"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return p.returncode == 0, p.stdout + "\n" + p.stderr
+
+
+def propose_fix(source, test_log):
+    prompt = f"""
+You are repairing exactly one Python file: calc.py.
+Return ONLY the complete replacement contents of calc.py.
+Do not modify tests. Do not add dependencies. Keep the public function name divide.
+
+CURRENT FILE:
+{source}
+
+TEST OUTPUT:
+{test_log}
+"""
+    r = client.responses.create(model=MODEL, input=prompt)
+    return r.output_text.strip()
+
+
+def candidate_is_allowed(text):
+    forbidden = ["subprocess", "os.system", "pytest", "test_calc"]
+    return all(x not in text for x in forbidden) and "def divide" in text
+
+
+def main():
+    if not BACKUP.exists():
+        shutil.copy2(TARGET, BACKUP)
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        ok, log = run_tests()
+        print(f"attempt={attempt} tests={'PASS' if ok else 'FAIL'}")
+        print(log)
+        if ok:
+            print("DONE")
+            return
+
+        source = TARGET.read_text(encoding="utf-8")
+        candidate = propose_fix(source, log)
+
+        if not candidate_is_allowed(candidate):
+            print("candidate rejected by policy")
+            continue
+
+        TARGET.write_text(candidate + "\n", encoding="utf-8")
+
+    ok, log = run_tests()
+    if ok:
+        print("DONE")
+    else:
+        print("STOP: retry limit reached")
+        shutil.copy2(BACKUP, TARGET)
+        print("restored original file")
+
+
+if __name__ == "__main__":
+    main()
+</code></pre></section><section><h2>4. 実行する</h2><pre><code>set OPENAI_API_KEY=...
+python repair_loop.py
+</code></pre><p>うまくいけば、Agentが <code>//</code> を <code>/</code> へ修正し、次のtest実行で終了します。モデルが誤った修正を返しても、testが通らなければ次のloopへ進みます。</p></section><section><h2>5. Promptではなくループ側が品質を作っている</h2><p>この例で重要なのはpromptの文言より、外部の制御です。</p><ul class="checklist"><li>成功条件はモデル自己申告ではなくpytest。</li><li>失敗logを次回のobservationとして戻す。</li><li>最大3回で停止する。</li><li>test変更は禁止する。</li><li>候補コードをpolicy checkする。</li><li>失敗時は元ファイルへrollbackする。</li></ul><p>「必ず正しく直してください」と強く書いても、この仕組みの代わりにはなりません。</p></section><section><h2>6. Stop Criteriaを増やす</h2><p>実務では回数だけでなく、次の条件でも止めます。</p><pre><code>if estimated_cost &gt; budget:
+    stop("budget exceeded")
+
+if same_failure_count &gt;= 2:
+    stop("same failure repeated")
+
+if candidate_changes_public_api:
+    stop("requires human decision")
+
+if touches_production_credentials:
+    stop("forbidden capability")
+</code></pre><p>Agentが「続けられる」ことと「続けてよい」ことは別です。</p></section><section><h2>7. Observationをそのまま全部戻さない</h2><p>test logが数万行になった場合、全量を毎回Contextへ戻すとコストとノイズが増えます。まず失敗test名、例外、stack trace周辺だけ抽出し、原ログへのpathを残します。</p><pre><code>OBSERVATION = {
+    "failed_tests": ["test_normal", "test_negative"],
+    "error": "expected 2.5 but got 2",
+    "full_log": "artifacts/pytest-002.log"
+}
+</code></pre><p>これはContext Engineeringともつながります。</p></section><section><h2>8. 同じ失敗を繰り返したら戦略を変える</h2><p>ただ再実行するだけでは「retry loop」であって、賢いloopではありません。2回同じ失敗なら、次のactionを変えます。</p><ul class="checklist"><li>追加の関連ファイルを読む。</li><li>別の仮説を要求する。</li><li>強いモデルへ切り替える。</li><li>人間へ判断を戻す。</li></ul><p>failure signatureを保存して、同じerror textや同じtest failureが続いた回数を数えられます。</p></section><section><h2>9. Loopを評価する</h2><p>5〜20個の壊れた関数を用意し、次を記録します。</p><ul class="checklist"><li>1回目で直った割合。</li><li>3回以内で直った割合。</li><li>平均試行回数。</li><li>testを壊そうとした回数。</li><li>rollback回数。</li><li>成功1件あたりのtoken / API費用。</li></ul><p>「1回の回答品質」ではなく、loop全体で成功までに使った資源を見るのがポイントです。</p></section><section><h2>10. Loop Engineeringが使える場所</h2><div class="table-wrap"><table><thead><tr><th>用途</th><th>action</th><th>validation</th></tr></thead><tbody><tr><td>コード修正</td><td>patch</td><td>tests / lint / benchmark</td></tr><tr><td>調査</td><td>search</td><td>根拠不足・矛盾チェック</td></tr><tr><td>データ移行</td><td>batch処理</td><td>件数・checksum・sample比較</td></tr><tr><td>文章</td><td>draft修正</td><td>rubric / fact check</td></tr><tr><td>AITuber</td><td>発話・行動</td><td>moderation / state / viewer event</td></tr></tbody></table></div></section><section><h2>「Loop Engineering」という言葉について</h2><p>これはPrompt Engineeringほど確立した古い用語ではなく、2026年にIBMなどがagentic workflowの反復設計を表す言葉として使っている新しい呼称です。重要なのは名前より、Agentの行動、観察、検証、再試行、停止を明示的に設計する考え方です。</p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://www.ibm.com/think/topics/loop-engineering">IBM — What is Loop Engineering?</a></li><li><a href="context-engineering.html">Context Engineering</a></li><li><a href="evals.html">Evals</a></li><li><a href="ai-agents.html">AI Agent</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="ai-agents.html">次: AI Agent →</a></footer></main></body></html>
