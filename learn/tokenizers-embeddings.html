@@ -1,1 +1,79 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TokenizerとEmbedding — AIを学ぶ</title><meta name="description" content="文章がtokenとベクトルへ変わる仕組みを直感的に説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Tokens & Embeddings</div><h1>LLMは文字列をそのまま読まず、token IDとベクトルで扱う</h1><p class="lead">最初に文章をtokenへ分割し、それぞれを数値IDへ変えます。そのIDをEmbeddingで連続的なベクトルへ変換してからTransformerへ渡します。</p><section><h2>tokenは「単語」とは限らない</h2><p>英単語1個、単語の一部、日本語の文字列、記号などがtokenになります。同じ文章でもTokenizerが違えばtoken数が変わり、料金やコンテキスト使用量にも影響します。</p></section><section><h2>Embeddingは似た使われ方を近い位置へ置く</h2><p>Embeddingはtokenや文章を多次元ベクトルに変えます。検索用Embeddingでは、意味が近い文章ほどベクトル空間でも近くなる性質を使い、RAGの候補検索などに利用します。</p></section><section><h2>実際に触る</h2><p>Hugging FaceのTokenizersやTransformersを使うと、文章がどのtoken IDへ分割されるかを確認できます。日本語、英語、コード、絵文字で分割結果を比べると感覚がつかみやすいです。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="rag.html">RAG</a></li><li><a href="transformer-attention.html">TransformerとAttention</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/1">Hugging Face LLM Course</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TokenizerとEmbedding — AIを学ぶ</title><meta name="description" content="Tokenizerの分割とEmbeddingの類似度を実際に計測し、RAGにつながる仕組みを学ぶハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Tokens & Embeddings</div><h1>文章がtoken IDとベクトルへ変わるところを実際に見る</h1><p class="lead">LLMは文字列をそのまま計算しません。まずTokenizerが文字列をtoken ID列へ変換し、そのIDをEmbeddingでベクトルへ変換します。このページでは日本語・英語・コード・絵文字の分割差と、文章Embeddingの類似度を実測します。</p><section><h2>環境</h2><pre><code>python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate
+pip install transformers sentence-transformers torch
+</code></pre></section><section><h2>1. Tokenizerで同じ文章を分割する</h2><p>Hugging FaceのTokenizerを使います。モデルごとにTokenizerが違うため、同じ文章でもtoken数は変わります。</p><pre><code>from transformers import AutoTokenizer
+
+model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(model_name)
+
+samples = [
+    "今日は良い天気です。",
+    "The weather is nice today.",
+    "def hello(name): return f'Hello {name}'",
+    "LLM🤖とRAG🔎を試す",
+]
+
+for text in samples:
+    ids = tok.encode(text, add_special_tokens=False)
+    pieces = [tok.decode([i]) for i in ids]
+    print("TEXT:", text)
+    print("IDS :", ids)
+    print("TOKENS:", pieces)
+    print("COUNT:", len(ids))
+    print()
+</code></pre><p>「単語数」とtoken数は一致しません。日本語1文字が必ず1tokenになるわけでも、英単語1個が必ず1tokenになるわけでもありません。</p></section><section><h2>2. token数がなぜ実用上重要か</h2><p>token数は少なくとも次の4点へ影響します。</p><ul class="checklist"><li>コンテキスト上限に何文字入るか。</li><li>APIの入力・出力コスト。</li><li>推論時間とメモリ使用量。</li><li>chunkを切るときの実際の長さ。</li></ul><p>RAGで「500文字ずつ」に切っても、言語や内容によってtoken数は大きく変わります。実装では文字数ではなく、実際に使うTokenizerでtoken数を測る方が安全です。</p></section><section><h2>3. 自分でBPEの雰囲気を観察する</h2><p>同じ語を少しずつ変えて分割を比較します。</p><pre><code>words = [
+    "engineering",
+    "engineer",
+    "engineered",
+    "context engineering",
+    "context-engineering",
+]
+
+for text in words:
+    ids = tok.encode(text, add_special_tokens=False)
+    print(text, [tok.decode([i]) for i in ids])
+</code></pre><p>Tokenizerは辞書で単語を引くだけではなく、学習済みのsubword単位へ分割します。頻出パターンは大きな単位、珍しい文字列は細かい単位になりやすくなります。</p></section><section><h2>4. Embeddingで文章をベクトルへ変える</h2><p>次は検索向けEmbeddingを使い、意味が近い文のcosine similarityを測ります。</p><pre><code>from sentence_transformers import SentenceTransformer
+import numpy as np
+
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+sentences = [
+    "猫がソファで寝ている",
+    "ソファの上で猫が眠っている",
+    "新しいGPUで機械学習を高速化する",
+    "犬が公園を走っている",
+]
+
+vectors = model.encode(sentences, normalize_embeddings=True)
+sim = vectors @ vectors.T
+
+print(np.round(sim, 3))
+</code></pre><p>対角線は自分自身なので1です。「猫がソファで寝ている」と「ソファの上で猫が眠っている」は、語順や表面文字列が違っても比較的高い類似度になるはずです。</p></section><section><h2>5. 5行の意味検索を作る</h2><pre><code>docs = [
+    "返品は商品到着から14日以内です",
+    "パスワードを忘れた場合は再設定メールを送れます",
+    "請求書は毎月1日に発行されます",
+    "配送状況は注文履歴から確認できます",
+]
+
+doc_vecs = model.encode(docs, normalize_embeddings=True)
+
+def search(query, k=2):
+    q = model.encode([query], normalize_embeddings=True)[0]
+    scores = doc_vecs @ q
+    order = np.argsort(scores)[::-1][:k]
+    return [(float(scores[i]), docs[i]) for i in order]
+
+print(search("荷物が今どこにあるか知りたい"))
+</code></pre><p>これだけで簡単なsemantic searchになります。RAGはこの検索結果をLLMへ渡して回答させる構成です。</p></section><section><h2>6. Embeddingは「意味そのもの」ではない</h2><p>近いベクトルだから必ず正しい検索結果とは限りません。数値、否定、固有名詞、日付、似た定型文では誤ることがあります。実用RAGではkeyword search、metadata filter、rerankerなどを組み合わせることがあります。</p><p>次の文を追加して類似度を確認してみてください。</p><pre><code>"返品は商品到着から14日以内です"
+"返品は商品到着から14日以内ではありません"
+</code></pre><p>否定だけが違う2文がかなり近くなる可能性があります。Embeddingの距離と論理的な同一性は別です。</p></section><section><h2>7. 可視化してみる</h2><p>Embeddingは数百次元ありますが、PCAで2次元に落として位置関係を見ることもできます。</p><pre><code>pip install scikit-learn matplotlib
+</code></pre><pre><code>from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
+xy = PCA(n_components=2).fit_transform(vectors)
+for i, (x, y) in enumerate(xy):
+    plt.scatter(x, y)
+    plt.text(x, y, str(i))
+plt.show()
+</code></pre><p>2次元化で情報は失われるため、図上の距離をそのまま本来の距離だとは考えません。用途は直感を掴むことです。</p></section><section><h2>確認課題</h2><ul class="checklist"><li>日本語・英語で同じ内容を書き、token数を比較する。</li><li>URL、JSON、ソースコード、絵文字でtoken数を測る。</li><li>意味検索へ10〜100文を追加し、誤検索例を探す。</li><li>否定文、数値違い、日付違いのEmbedding類似度を比較する。</li><li>次の<a href="rag.html">RAGハンズオン</a>で検索結果を回答生成へつなぐ。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://huggingface.co/docs/transformers/main_classes/tokenizer">Hugging Face — Tokenizer</a></li><li><a href="https://www.sbert.net/">Sentence Transformers</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter2/4">Hugging Face LLM Course — Tokenizers</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="rag.html">次: RAGを作る →</a></footer></main></body></html>
