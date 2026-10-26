@@ -1,1 +1,40 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LLMは何をしているのか — AIを学ぶ</title><meta name="description" content="大規模言語モデルがtoken予測から会話やコード生成へつながる仕組みを直感的に説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · LLM</div><h1>LLMは「文章を理解して答えを取り出す箱」ではない</h1><p class="lead">基本は、ここまでのtoken列を見て「次に何が来そうか」を予測するモデルです。ただし巨大なデータとモデル規模、指示学習、ツール利用などが重なることで、会話・コード・要約・推論のように見える能力が現れます。</p><section><h2>最小の流れ</h2><ol><li>文章をtokenへ分ける。</li><li>tokenをベクトルへ変換する。</li><li>Transformerが前後の関係を混ぜる。</li><li>次tokenの確率を出す。</li><li>選んだtokenを末尾へ足し、また予測する。</li></ol><p>長い文章も、最終的にはこの反復で生成されます。</p></section><section><h2>では「考える」とは何か</h2><p>モデル内部に人間と同じ思考器官がある、と考える必要はありません。学習中に文章、コード、説明、問題解決のパターンを圧縮し、入力に応じてそれらを再構成していると見る方が実用的です。現在の推論モデルは、回答前の計算量や内部推論を増やし、難しい問題で性能を上げる方向にも発展しています。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="transformer-attention.html">TransformerとAttention</a></li><li><a href="tokenizers-embeddings.html">TokenizerとEmbedding</a></li><li><a href="build-small-llm.html">小さなLLMを作る</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/1">Hugging Face LLM Course</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LLMは何をしているのか — AIを学ぶ</title><meta name="description" content="次token予測を実際に動かしながら、LLMの基本原理を理解するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · LLM</div><h1>LLMは「次に来るtoken」を予測し続けて文章を作る</h1><p class="lead">LLMの中核は、ここまでのtoken列から次tokenの確率分布を出すことです。このページでは、まず外部ライブラリなしの小さな言語モデルを動かし、その後でTransformer型LLMでは何が増えるのかをつなげて理解します。</p><section><h2>このページでやること</h2><p>Pythonだけで文字単位のbigram言語モデルを作り、短い文章から遷移確率を学習し、実際に文章を生成します。これはLLMではありませんが、「学習データから次tokenの確率を覚え、1tokenずつ生成する」という最小原理をそのまま観察できます。</p></section><section><h2>1. まず最小の言語モデルを動かす</h2><p>Python 3.10以降があれば動きます。`tiny_lm.py` を作り、次を保存します。</p><pre><code>from collections import defaultdict, Counter
+import random
+
+text = """AIは文章を生成する。AIは次の文字を予測する。
+文章は文字の並びでできている。予測を繰り返すと文章になる。"""
+
+counts = defaultdict(Counter)
+for a, b in zip(text, text[1:]):
+    counts[a][b] += 1
+
+probs = {}
+for a, counter in counts.items():
+    chars = list(counter.keys())
+    weights = list(counter.values())
+    probs[a] = (chars, weights)
+
+def sample_next(ch):
+    chars, weights = probs.get(ch, (["。"], [1]))
+    return random.choices(chars, weights=weights, k=1)[0]
+
+def generate(start="A", length=80):
+    out = [start]
+    for _ in range(length - 1):
+        out.append(sample_next(out[-1]))
+    return "".join(out)
+
+for _ in range(5):
+    print(generate("A"))
+</code></pre><p><code>python tiny_lm.py</code> を実行すると、学習文に似た文字列が生成されます。意味はかなり壊れますが、同じ文字の後に何が出やすいかは反映されます。</p></section><section><h2>2. 何を学習したのかを見る</h2><p>次のコードを末尾へ足します。</p><pre><code>for ch in ["A", "I", "は", "文", "予"]:
+    print(ch, counts[ch].most_common())
+</code></pre><p>たとえば「A」の次は「I」がほぼ確実、「文」の次は「章」が多い、といった遷移が見えます。このモデルが見ている文脈は直前1文字だけです。だから長い依存関係は扱えません。</p></section><section><h2>3. LLMでは何が違うのか</h2><p>現在のLLMは、直前1tokenだけではなく長いtoken列を入力し、Transformerで各token同士の関係を何層も計算します。学習の基本目標は依然として「正しい次tokenの確率を上げる」ことです。</p><p>大まかには次の流れです。</p><ol><li>文章をTokenizerでtoken IDへ変換する。</li><li>Embeddingでtoken IDをベクトルへ変える。</li><li>Transformerが文脈を混ぜる。</li><li>語彙数ぶんのlogitを出す。</li><li>正解tokenとのcross entropy lossを計算する。</li><li>backpropagationで重みを更新する。</li></ol></section><section><h2>4. 「確率を出す」と「文章を生成する」は別</h2><p>モデルは次tokenの確率分布を返します。そこから何を選ぶかはsampling側の仕事です。常に最大確率を選ぶと同じような文章になりやすく、温度を上げると珍しいtokenも選ばれやすくなります。</p><pre><code>import math, random
+
+def sample_with_temperature(logits, temperature=1.0):
+    scaled = [x / temperature for x in logits]
+    m = max(scaled)
+    exp = [math.exp(x - m) for x in scaled]
+    total = sum(exp)
+    probs = [x / total for x in exp]
+    return random.choices(range(len(logits)), weights=probs, k=1)[0]
+</code></pre><p>temperatureは「モデルの知識量」を変える設定ではありません。同じlogitからどれだけ保守的・多様に選ぶかを変えます。</p></section><section><h2>5. 学習と推論を区別する</h2><div class="table-wrap"><table><thead><tr><th></th><th>学習</th><th>推論</th></tr></thead><tbody><tr><td>入力</td><td>大量のtoken列</td><td>Prompt / 会話 / Tool結果</td></tr><tr><td>すること</td><td>lossを計算して重み更新</td><td>固定した重みで次tokenを予測</td></tr><tr><td>主な計算</td><td>forward + backward</td><td>forwardのみ</td></tr><tr><td>結果</td><td>checkpoint</td><td>生成token</td></tr></tbody></table></div><p>ChatGPTへ会話中に情報を教えても、通常その場でモデルの重みが再学習されるわけではありません。会話履歴やMemoryなどが入力コンテキストとして使われるのと、fine-tuningで重みを更新するのは別です。</p></section><section><h2>6. 自分で確かめる実験</h2><p>bigramモデルの学習文を変えて、次を試してください。</p><ul class="checklist"><li>同じ語句を10回追加すると、生成頻度がどう変わるか。</li><li>学習データを10倍にすると、文章らしさがどう変わるか。</li><li>bigramを「直前2文字→次1文字」に変えると何が改善するか。</li><li>未知の先頭文字を入れたとき、なぜ破綻するか。</li></ul><p>ここまでで、「学習データ」「文脈長」「確率分布」「sampling」が別々の要素だと見えてきます。</p></section><section><h2>次は本当に学習するTransformerを作る</h2><p><a href="build-small-llm.html">小さなLLMを自分で作る</a>では、PyTorchでEmbedding、位置情報、Transformer、cross entropy、optimizer、checkpoint、生成まで一通り実装します。</p></section><section><h2>原典・追加資料</h2><ul class="checklist"><li><a href="https://arxiv.org/abs/1706.03762">Vaswani et al. — Attention Is All You Need</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/1">Hugging Face LLM Course</a></li><li><a href="https://github.com/karpathy/nanochat">Andrej Karpathy — nanochat</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="build-small-llm.html">次: 小さなLLMを作る →</a></footer></main></body></html>
