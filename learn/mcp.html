@@ -1,1 +1,59 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MCPとは — AIを学ぶ</title><meta name="description" content="Model Context ProtocolがAIとツール・データをどうつなぐかを説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · MCP</div><h1>MCPは、AIと外部ツール・データをつなぐための共通規格</h1><p class="lead">Model Context Protocol（MCP）は、LLMアプリが毎回専用実装を書かなくても、外部データや操作を共通の形で発見・利用できるようにするオープンプロトコルです。</p><section><h2>何を公開するのか</h2><p>現在のMCPでは、主にTools、Resources、Promptsといったprimitiveを通じて能力や情報を提供します。AIアプリ側は、サーバーが何を提供しているかを発見し、必要なものを呼び出します。</p></section><section><h2>例</h2><p>GitHub、Google Drive、DB、社内APIをそれぞれMCP serverとして公開すれば、MCP client対応のAIから共通の仕組みでアクセスできます。MCPは「AIが賢くなる仕組み」ではなく、外部能力への接続方法です。</p></section><section><h2>注意点</h2><p>接続できる能力が増えるほど、権限と認証が重要になります。読み取りだけでよいAgentへ削除や本番変更の権限まで渡さないようにします。</p></section><section><h2>現在の仕様は変化が速い</h2><p>MCPは活発に更新されています。実装時は古いブログ記事だけでなく、現在の仕様と使うSDKのバージョンを確認します。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="skills-plugins.html">SkillとPlugin</a></li><li><a href="llm-security.html">LLM Security</a></li><li><a href="https://github.com/modelcontextprotocol">Model Context Protocol公式GitHub</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MCPサーバーを作る — AIを学ぶ</title><meta name="description" content="MCP Python SDK v2でToolとResourceを公開し、InspectorとClientから呼ぶハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · MCP</div><h1>MCPサーバーを作り、ToolとResourceを実際に呼び出す</h1><p class="lead">MCPはAIと外部能力をつなぐ共通プロトコルです。このページでは現在のPython SDK v2を使い、計算Toolと設定Resourceを公開し、MCP InspectorとPython Clientの両方から呼び出します。</p><section><h2>完成するもの</h2><pre><code>mcp-demo/
+├─ server.py
+└─ client.py
+</code></pre><p>serverは <code>add(a,b)</code> Toolと <code>config://app</code> Resourceを公開します。LLMは登場しません。まずMCPそのものが「モデル」ではなく「能力を発見・呼び出す規格」だと確認します。</p></section><section><h2>1. 環境</h2><p>Python SDK v2は現行stableです。</p><pre><code>python -m venv .venv
+.venv\Scripts\activate
+pip install "mcp[cli]"
+</code></pre><p>古い記事では <code>FastMCP</code> が出てきますが、Python SDK v2では高水準server classが <code>MCPServer</code> に変わっています。古いコードをそのまま混ぜないでください。</p></section><section><h2>2. 最小serverを書く</h2><p><code>server.py</code>:</p><pre><code>from mcp.server import MCPServer
+
+mcp = MCPServer(
+    "Demo",
+    instructions="Use tools for calculations. Read config resources when configuration matters.",
+)
+
+
+@mcp.tool()
+def add(a: int, b: int) -&gt; int:
+    """Add two integers."""
+    return a + b
+
+
+@mcp.resource("config://app")
+def app_config() -&gt; str:
+    """Return the demo application configuration."""
+    return "environment=dev\nregion=ap-northeast-1\nread_only=true"
+</code></pre><p>型注釈とdocstringからTool schemaが作られます。手でJSON Schemaを書く必要はありません。</p></section><section><h2>3. Inspectorで触る</h2><pre><code>mcp dev server.py
+</code></pre><p>表示されたURLを開き、Toolsから <code>add</code> を選び、<code>a=10, b=32</code> を実行します。Resourcesから <code>config://app</code> も読めます。</p><p>ここで確認するのは、モデルがなくてもMCP serverが能力一覧とschema、実行結果を提供できることです。</p></section><section><h2>4. Python Clientから呼ぶ</h2><p>テストではnetworkを使わず、server objectへ直接Clientを接続できます。</p><p><code>client.py</code>:</p><pre><code>import anyio
+from mcp import Client
+from server import mcp
+
+
+async def main():
+    async with Client(mcp, raise_exceptions=True) as client:
+        tools = await client.list_tools()
+        print("TOOLS:", [t.name for t in tools.tools])
+
+        result = await client.call_tool("add", {"a": 10, "b": 32})
+        print("ADD:", result.structured_content or result.content)
+
+        resource = await client.read_resource("config://app")
+        print("RESOURCE:")
+        for item in resource.contents:
+            if hasattr(item, "text"):
+                print(item.text)
+
+
+anyio.run(main)
+</code></pre><pre><code>python client.py
+</code></pre><p>本番ではURLによるStreamable HTTPやstdioなどへtransportを差し替えます。Client API側のTool呼び出しロジックは同じ考え方です。</p></section><section><h2>5. ToolとResourceを分ける</h2><div class="table-wrap"><table><thead><tr><th></th><th>Tool</th><th>Resource</th></tr></thead><tbody><tr><td>意味</td><td>処理・操作</td><td>読み取る情報</td></tr><tr><td>例</td><td>issue作成、検索、計算</td><td>設定、文書、schema</td></tr><tr><td>副作用</td><td>あり得る</td><td>基本は読み取り</td></tr><tr><td>権限設計</td><td>特に重要</td><td>機密データ範囲が重要</td></tr></tbody></table></div><p>「何でもTool」にせず、読み取り資料はResource、操作はToolという意味分けをすると、Agent側でも能力を理解しやすくなります。</p></section><section><h2>6. 書き込みToolを追加して危険を確認する</h2><p>次のようなToolを追加するときは、Toolのschemaだけで安全にはなりません。</p><pre><code>@mcp.tool()
+def delete_record(record_id: str) -&gt; str:
+    ...
+</code></pre><p>認証・認可・監査・confirmationをserver側で持ちます。「モデルへ削除しないでと書く」は認可の代わりになりません。</p></section><section><h2>7. Tool descriptionはAgentのroutingに効く</h2><p>Tool名とdescriptionが曖昧だと、モデルはどれを呼ぶべきか迷います。</p><pre><code># 悪い
+@mcp.tool()
+def run(x: str): ...
+
+# 良い
+@mcp.tool()
+def search_customer_orders(customer_id: str, limit: int = 20):
+    """Return recent orders for one customer. Read-only."""
+</code></pre><p>入力型、read-onlyか、対象範囲、limitなどをschemaで表現します。</p></section><section><h2>8. MCPをAgentへ渡す前に単体テストする</h2><p>LLMを挟む前にClientから次をテストします。</p><ul class="checklist"><li>Tool一覧が期待通りか。</li><li>schemaが型どおりか。</li><li>正常入力の結果。</li><li>存在しないIDや不正入力。</li><li>権限不足時のエラー。</li><li>timeout・外部API失敗。</li></ul><p>AgentがToolを間違える問題と、MCP server自体が壊れている問題を分けられます。</p></section><section><h2>9. v1の記事を読むときの注意</h2><p>2026年現在、Python SDK v2がstableで、MCP protocolも2026-07-28 revisionへ進んでいます。v1の <code>FastMCP</code> や古いsession/handshake前提の記事は、そのままコピーせずmigration guideと現行docsを確認します。</p></section><section><h2>10. 次に作る</h2><ul class="checklist"><li>SQLiteをread-only検索するToolを追加する。</li><li>HTTP serverとして起動し、別processからClientで接続する。</li><li>Toolごとの権限・監査ログを追加する。</li><li>同じ能力を普通のfunction toolで実装し、MCP化の利点を比較する。</li><li>AI AgentへMCP serverを接続し、Tool選択をevalする。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://py.sdk.modelcontextprotocol.io/">MCP Python SDK v2</a></li><li><a href="https://py.sdk.modelcontextprotocol.io/client/">MCP Python SDK — Client</a></li><li><a href="https://py.sdk.modelcontextprotocol.io/whats-new/">What's new in v2</a></li><li><a href="https://modelcontextprotocol.io/">Model Context Protocol</a></li><li><a href="llm-security.html">LLMアプリのセキュリティ</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="skills-plugins.html">次: SkillとPlugin →</a></footer></main></body></html>
