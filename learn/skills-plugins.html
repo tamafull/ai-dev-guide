@@ -1,1 +1,63 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SkillとPluginとは — AIを学ぶ</title><meta name="description" content="SkillとPluginの役割を、能力と手順の違いから説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Skills & Plugins</div><h1>Pluginは「何ができるか」、Skillは「どうやるか」を再利用する</h1><p class="lead">PluginはGmailやGitHubなど外部サービスへの接続、専用ツール、ワークフローを追加します。Skillは、何度も使う指示・参考資料・手順を保存し、同じやり方を再利用する仕組みです。</p><section><h2>例</h2><p>Gmail Pluginだけならメールを探せます。そこへ「会議の目的、顧客優先事項、決定、リスク、次の行動へ整理する」というSkillを組み合わせると、毎回同じ品質の会議準備を作りやすくなります。</p></section><section><h2>Skillに向くもの</h2><ul class="checklist"><li>毎週の定型レポート。</li><li>自分の文章校正ルール。</li><li>調査手順と出典の残し方。</li><li>レビュー観点。</li><li>旅行準備や学習ノートの形式。</li></ul></section><section><h2>Pluginに向くもの</h2><p>外部の現在情報を読む、サービスへ書き込む、専用APIを呼ぶなど、モデル単体ではできない能力です。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="mcp.html">MCP</a></li><li><a href="ai-agents.html">AI Agent</a></li><li><a href="https://developers.openai.com/training/walkthroughs/plugins-and-skills">OpenAI — Plugins and skills</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SkillとPluginを作る — AIを学ぶ</title><meta name="description" content="SKILL.mdを実際に作り、再利用可能なWorkflowとして設計し、Pluginとの境界まで理解するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Skills & Plugins</div><h1>繰り返す手順をSkillにし、必要ならPluginとして配布する</h1><p class="lead">Skillは「どう進めるか」を再利用する単位、PluginはSkillやMCP serverなどをまとめて配布する単位です。このページでは会議準備Skillを実際に作り、trigger、手順、テンプレート、失敗条件を定義します。</p><section><h2>完成するもの</h2><pre><code>meeting-prep/
+├─ SKILL.md
+├─ references/
+│  └─ brief-format.md
+└─ scripts/
+   └─ validate_brief.py
+</code></pre><p>Skillは「会議準備」という1つのjobだけに絞ります。GmailやCalendarのような外部能力はSkill自身へ埋め込まず、利用可能なPlugin/MCP Toolへ依存する設計にします。</p></section><section><h2>1. 最小SKILL.mdを書く</h2><p>Skillはフォルダ内の <code>SKILL.md</code> を中心に構成します。</p><pre><code>---
+name: meeting-prep
+description: Prepare a source-linked meeting brief from calendar events, messages, and notes. Use when the user asks to prepare for an upcoming meeting. Do not use for meeting minutes after the meeting.
+---
+
+Prepare a meeting brief.
+
+1. Identify the target meeting and its date/time.
+2. Find the latest relevant source material available through connected tools.
+3. Separate confirmed facts from missing information.
+4. Use `references/brief-format.md` for the output structure.
+5. Link or name every source used.
+6. Do not create, edit, or send calendar events or messages unless the user explicitly asks.
+7. If the meeting cannot be uniquely identified, stop and report what is ambiguous.
+</code></pre><p><code>description</code> は説明文ではなくrouting情報でもあります。「いつ使うか」と「いつ使わないか」を短く入れます。</p></section><section><h2>2. 出力テンプレートを別ファイルにする</h2><p><code>references/brief-format.md</code>:</p><pre><code># Meeting brief
+
+## Objective
+
+## Participants
+
+## Current facts
+
+## Decisions already made
+
+## Risks / open questions
+
+## Suggested questions
+
+## Sources
+</code></pre><p>長いテンプレートや背景資料をSKILL.md本体へ全部入れず、必要になったときだけ読む形にするとSkill一覧のContextを軽く保てます。</p></section><section><h2>3. 決定論的な検証はscriptへ出す</h2><p><code>scripts/validate_brief.py</code>:</p><pre><code>from pathlib import Path
+import sys
+
+required = [
+    "## Objective",
+    "## Participants",
+    "## Current facts",
+    "## Risks / open questions",
+    "## Sources",
+]
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+missing = [x for x in required if x not in text]
+
+if missing:
+    print("missing:", missing)
+    raise SystemExit(1)
+
+print("brief structure: OK")
+</code></pre><p>見出しの存在確認までLLMへ自己採点させる必要はありません。決定論的に判定できる部分はscriptへ出します。</p></section><section><h2>4. triggerをテストする</h2><p>良いSkillは手順だけでなく、呼ばれる範囲が適切です。次のpromptで期待する挙動を決めます。</p><div class="table-wrap"><table><thead><tr><th>Prompt</th><th>期待</th></tr></thead><tbody><tr><td>「明日のAcme会議の準備をして」</td><td>trigger</td></tr><tr><td>「来週の1on1用に関連メモを整理して」</td><td>trigger候補</td></tr><tr><td>「今日の会議の議事録を書いて」</td><td>triggerしない</td></tr><tr><td>「会議を木曜14時に作って」</td><td>meeting-prepではなくCalendar操作</td></tr></tbody></table></div><p>Skillを増やすほどdescription同士の境界が重要になります。</p></section><section><h2>5. SkillとSystem Promptを分ける</h2><p>毎turn必ず守る短い安全ルールはglobal instruction側、特定jobだけで使う長い手順はSkillへ置きます。</p><div class="table-wrap"><table><thead><tr><th>置き場所</th><th>例</th></tr></thead><tbody><tr><td>Global instruction</td><td>秘密情報を公開しない、破壊操作は承認必須</td></tr><tr><td>Skill</td><td>会議準備、リリースノート、PR review手順</td></tr><tr><td>Tool / MCP</td><td>メール検索、Calendar取得、Issue更新</td></tr><tr><td>Reference</td><td>テンプレート、社内規約、判断表</td></tr><tr><td>Script</td><td>lint、CSV整形、検証、変換</td></tr></tbody></table></div></section><section><h2>6. Pluginとの境界</h2><p>Pluginはinstall可能なbundleで、Skillだけでも、Skill＋MCP serverでも構成できます。</p><pre><code>Plugin
+├─ Skills
+│  └─ meeting-prep/
+│     ├─ SKILL.md
+│     └─ references/...
+└─ MCP server (optional)
+   ├─ search_email
+   └─ get_calendar_event
+</code></pre><p>MCP serverは認証、認可、live data、actionを提供し、Skillはそれらをどう組み合わせるかを説明します。</p></section><section><h2>7. Skillを作る前に一度手で成功させる</h2><p>曖昧なworkflowを先にSkill化すると、曖昧さが固定されます。</p><ol><li>普通の会話で1件成功させる。</li><li>どの入力・資料・判断が必要だったか記録する。</li><li>再利用部分だけSKILL.mdへ抽出する。</li><li>triggerとnon-trigger promptを用意する。</li><li>別の会議で再実行する。</li></ol><p>現在のChatGPT/OpenAIの公式ガイドでも、「まず1回やる→方法を保存→別入力で再利用→改善」という流れが推奨されています。</p></section><section><h2>8. Contextを増やさないSkill設計</h2><p>Skillはprogressive disclosureで使われます。最初はname/descriptionなどのmetadataだけが見え、選択された後にSKILL.md本体、さらに必要ならreferences/scriptsを読みます。</p><p>そのため、descriptionへ詳細手順を全部書かず、trigger判断に必要な情報だけをfront-loadします。</p></section><section><h2>9. セキュリティ</h2><p>Skillは命令とscriptを持てるため、信頼できないSkillを高権限Toolと組み合わせると危険です。install前に次を確認します。</p><ul class="checklist"><li>scriptがどのファイル・networkへ触るか。</li><li>MCP/tool依存が何を許可するか。</li><li>秘密情報を外部へ送る手順がないか。</li><li>暗黙triggerが広すぎないか。</li><li>破壊操作前の承認があるか。</li></ul></section><section><h2>10. 次に作るSkill</h2><ul class="checklist"><li>PR review: diff→risk分類→test確認→review template。</li><li>research: search→一次情報確認→反証検索→出典付き要約。</li><li>study-note: 資料→問題生成→回答→弱点記録。</li><li>incident-summary: logs→timeline→impact→unknown→next action。</li></ul><p>各Skillは「何でもできる万能Skill」ではなく、1つのjobに狭く保つ方がtriggerと評価がしやすくなります。</p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://learn.chatgpt.com/docs/build-skills">ChatGPT Learn — Build skills</a></li><li><a href="https://developers.openai.com/plugins/concepts/skills">OpenAI Developers — Skills</a></li><li><a href="https://developers.openai.com/plugins/build/skills">Build skills in plugins</a></li><li><a href="https://developers.openai.com/training/walkthroughs/plugins-and-skills">Plugins and skills walkthrough</a></li><li><a href="mcp.html">MCPを作る</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="evals.html">次: Evals →</a></footer></main></body></html>
