@@ -3,7 +3,7 @@
   if (!header) return;
 
   const path = window.location.pathname;
-  const nested = /\/(articles|everyday)\//.test(path);
+  const nested = /\/(articles|everyday|learn)\//.test(path);
   const prefix = nested ? '../' : '';
 
   const brand = header.querySelector('.brand');
@@ -15,6 +15,7 @@
   const items = [
     ['実務ガイド', `${prefix}index.html`, /\/ai-dev-guide\/(?:index\.html)?$/],
     ['普段使い', `${prefix}everyday.html`, /\/everyday(?:\.html|\/)/],
+    ['AIを学ぶ', `${prefix}learn.html`, /\/learn(?:\.html|\/)/],
     ['最新記事', `${prefix}articles.html`, /\/articles(?:\.html|\/)/],
     ['AI年表', `${prefix}timeline.html`, /\/timeline\.html$/],
     ['用語集', `${prefix}glossary.html`, /\/glossary\.html$/],
