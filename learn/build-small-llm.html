@@ -1,1 +1,152 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小さなLLMを自分で作る — AIを学ぶ</title><meta name="description" content="小さな言語モデルを自分で学習させる最短ルートを説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Build a tiny LLM</div><h1>最初は「賢いLLM」ではなく、学習ループが見える小さいモデルを作る</h1><p class="lead">ChatGPT級を自宅で一から学習する必要はありません。数MBの文章と小さなTransformerでも、token化、損失計算、逆伝播、生成というLLMの基本構造を体験できます。</p><section><h2>最小構成</h2><ol><li>短いテキストデータを用意する。</li><li>文字または小さなTokenizerでID列へ変換する。</li><li>小さなTransformerを作る。</li><li>「次token予測」のcross entropyを下げる。</li><li>学習後に1tokenずつ生成してみる。</li></ol><p>最初はGPUがなくても動くサイズに落とし、モデルが文章のパターンを徐々に覚える様子を見るのが目的です。</p></section><section><h2>教材はnanoGPTより新しいnanochatも確認する</h2><p>Andrej KarpathyのnanoGPTは読みやすい実装として有名ですが、本人も2025年に後継のnanochatを案内しています。古い教材を使う場合は「仕組みを学ぶ教材」として扱い、現在の実運用構成と同一視しない方がよいです。</p></section><section><h2>次の段階</h2><p>一からの学習を体験したら、既存モデルを使う、LoRAで調整する、RAGで知識を足す、Evalsで比較する、という順へ進むと実用側へつながります。</p><ul class="checklist"><li><a href="fine-tuning-lora.html">Fine-tuning / LoRA</a></li><li><a href="rag.html">RAG</a></li><li><a href="evals.html">Evals</a></li><li><a href="https://github.com/karpathy/nanoGPT">karpathy/nanoGPT</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>小さなLLMを自分で作る — AIを学ぶ</title><meta name="description" content="PyTorchで小さなTransformer言語モデルを学習し、checkpoint保存と文章生成まで行うハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Build a tiny LLM</div><h1>PyTorchで小さなTransformer言語モデルを最後まで作る</h1><p class="lead">このハンズオンでは、テキストを読み込み、文字をID化し、Transformerを学習し、checkpointを保存し、保存済みモデルから文章を生成します。ChatGPT級の性能を狙うのではなく、LLM学習の一連の流れを1ファイルで通します。</p><section><h2>完成するもの</h2><p><code>input.txt</code> を学習データとして、文字単位のcausal language modelを学習します。数分〜数十分の学習後、学習データに似た文章を生成できる状態がゴールです。</p><pre><code>tiny-llm/
+├─ input.txt
+├─ train.py
+└─ checkpoint.pt
+</code></pre><p>CPUでも動きます。CUDA GPUがあれば自動で使います。学習時間はデータ量とPC性能で大きく変わります。</p></section><section><h2>1. 環境を作る</h2><pre><code>python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install torch
+</code></pre><p>Python 3.10以降を想定しています。PyTorchのGPU版は環境によってインストール方法が異なるため、GPUを使う場合はPyTorch公式のインストール案内を確認してください。</p></section><section><h2>2. 学習データを置く</h2><p><code>input.txt</code> に、著作権や利用条件を確認できるテキストを入れます。まずは数十KB以上あると変化を観察しやすくなります。</p><p>この実装は文字単位なので、日本語でも英語でも動きます。実用LLMは通常subword tokenizerを使いますが、文字単位にするとTokenizer実装を省いてTransformerの学習ループへ集中できます。</p></section><section><h2>3. 学習コードを書く</h2><p><code>train.py</code> を作ります。</p><pre><code>import math
+import torch
+import torch.nn as nn
+from pathlib import Path
+
+# ---- hyper parameters ----
+batch_size = 32
+block_size = 128
+embed_dim = 192
+num_heads = 6
+num_layers = 4
+dropout = 0.1
+steps = 3000
+lr = 3e-4
+
+# ---- data ----
+text = Path("input.txt").read_text(encoding="utf-8")
+chars = sorted(set(text))
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for ch, i in stoi.items()}
+
+encode = lambda s: [stoi[c] for c in s if c in stoi]
+decode = lambda ids: "".join(itos[i] for i in ids)
+
+data = torch.tensor(encode(text), dtype=torch.long)
+split = int(len(data) * 0.9)
+train_data = data[:split]
+val_data = data[split:]
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device:", device, "vocab:", len(chars), "tokens:", len(data))
+
+def get_batch(source):
+    max_start = len(source) - block_size - 1
+    ix = torch.randint(max_start, (batch_size,))
+    x = torch.stack([source[i:i + block_size] for i in ix])
+    y = torch.stack([source[i + 1:i + block_size + 1] for i in ix])
+    return x.to(device), y.to(device)
+
+class TinyLM(nn.Module):
+    def __init__(self, vocab_size):
+        super().__init__()
+        self.token_emb = nn.Embedding(vocab_size, embed_dim)
+        self.pos_emb = nn.Embedding(block_size, embed_dim)
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=embed_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.ln = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, idx, targets=None):
+        b, t = idx.shape
+        pos = torch.arange(t, device=idx.device)
+        x = self.token_emb(idx) + self.pos_emb(pos)[None, :, :]
+
+        # True = future tokenを見てはいけない
+        mask = torch.triu(
+            torch.ones(t, t, device=idx.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        x = self.transformer(x, mask=mask)
+        logits = self.head(self.ln(x))
+
+        loss = None
+        if targets is not None:
+            loss = nn.functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                targets.reshape(-1),
+            )
+        return logits, loss
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens=300, temperature=0.8):
+        for _ in range(max_new_tokens):
+            context = idx[:, -block_size:]
+            logits, _ = self(context)
+            logits = logits[:, -1, :] / temperature
+            probs = torch.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat([idx, next_id], dim=1)
+        return idx
+
+model = TinyLM(len(chars)).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+@torch.no_grad()
+def estimate_loss():
+    model.eval()
+    out = {}
+    for name, source in [("train", train_data), ("val", val_data)]:
+        losses = []
+        for _ in range(30):
+            x, y = get_batch(source)
+            _, loss = model(x, y)
+            losses.append(loss.item())
+        out[name] = sum(losses) / len(losses)
+    model.train()
+    return out
+
+for step in range(steps + 1):
+    if step % 250 == 0:
+        losses = estimate_loss()
+        print(step, losses)
+
+    x, y = get_batch(train_data)
+    _, loss = model(x, y)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+checkpoint = {
+    "model": model.state_dict(),
+    "chars": chars,
+    "config": {
+        "block_size": block_size,
+        "embed_dim": embed_dim,
+        "num_heads": num_heads,
+        "num_layers": num_layers,
+    },
+}
+torch.save(checkpoint, "checkpoint.pt")
+
+start = torch.tensor([[0]], dtype=torch.long, device=device)
+out = model.generate(start, max_new_tokens=500)
+print(decode(out[0].tolist()))
+</code></pre></section><section><h2>4. 学習する</h2><pre><code>python train.py
+</code></pre><p>途中で次のようなログが出ます。</p><pre><code>device: cuda vocab: 1432 tokens: 218450
+0 {'train': 7.19, 'val': 7.21}
+250 {'train': 4.12, 'val': 4.29}
+500 {'train': 3.51, 'val': 3.74}
+...
+</code></pre><p>数値はデータで変わります。見るべきなのは絶対値ではなく、train lossとvalidation lossがどう動くかです。trainだけ下がり、valが悪化し始めるなら過学習の兆候です。</p></section><section><h2>5. 何が起きているか</h2><p><code>x</code> は長さ128の文字ID列、<code>y</code> はそれを1文字ずらした正解列です。位置0では位置1の文字を、位置1では位置2の文字を当てます。causal maskによって未来の文字を参照できない状態で、全位置の次token予測を一度に学習します。</p><p>Embeddingは文字IDを192次元ベクトルに変えます。Transformer Encoderはcausal mask付きでSelf-Attentionを行い、最後のLinear層が語彙数ぶんのlogitを出します。cross entropyが「正解文字の確率をどれだけ高くできたか」を測ります。</p></section><section><h2>6. checkpointから生成する</h2><p>学習と生成を分けたい場合は <code>generate.py</code> を作ります。クラス定義と設定を共有するのが本来はきれいですが、最初はtrain.pyへ生成専用モードを足しても構いません。</p><p>checkpointに重みだけでなく、文字表とモデル構成も保存した理由は、生成時に同じID対応と同じネットワーク構造を再現する必要があるからです。</p></section><section><h2>7. うまくいかないとき</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>確認すること</th></tr></thead><tbody><tr><td><code>high &gt;= low</code> やbatch生成で例外</td><td>input.txtがblock_sizeより十分長いか。</td></tr><tr><td>lossがほぼ下がらない</td><td>learning rateを1e-4〜1e-3で試す。データが極端に短くないか。</td></tr><tr><td>同じ文字を繰り返す</td><td>学習不足、データ不足、temperatureが低すぎないか。</td></tr><tr><td>trainは良いがvalが悪い</td><td>モデルを小さくする、dropoutを上げる、データを増やす。</td></tr><tr><td>GPUメモリ不足</td><td>batch_size、block_size、embed_dim、num_layersを下げる。</td></tr></tbody></table></div></section><section><h2>8. 次に改造する</h2><p>このモデルを少しずつ実用LLMへ近づけると、各技術の必要性が見えてきます。</p><ol><li>文字TokenizerをBPEやSentencePieceへ置き換える。</li><li>学習率scheduleとwarmupを入れる。</li><li>mixed precisionを使う。</li><li>checkpointを定期保存し、途中再開できるようにする。</li><li>top-k / top-p samplingを追加する。</li><li>instruction形式のデータで追加学習する。</li><li>学習結果を固定評価セットで比較する。</li></ol></section><section><h2>nanochatとの違い</h2><p>このページのコードは仕組みを見通すためにかなり削っています。Andrej Karpathyのnanochatは、pretrainingだけだったnanoGPTより範囲が広く、現在はtokenization、pretraining、midtraining、fine-tuning、evaluation、chat UIまで一連の流れを扱う読みやすいbaselineとして公開されています。2026年の現行READMEでは、end-to-endで対話可能なChatGPT型モデルまで作ることを狙っています。</p></section><section><h2>原典・実装</h2><ul class="checklist"><li><a href="https://github.com/karpathy/nanochat">karpathy/nanochat</a></li><li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a></li><li><a href="https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoder.html">PyTorch — TransformerEncoder</a></li><li><a href="https://huggingface.co/learn/llm-course/chapter1/1">Hugging Face LLM Course</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="transformer-attention.html">次: TransformerとAttention →</a></footer></main></body></html>
