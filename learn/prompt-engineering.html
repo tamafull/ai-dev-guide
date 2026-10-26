@@ -1,1 +1,93 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt Engineeringとは — AIを学ぶ</title><meta name="description" content="Prompt Engineeringの役割と、現在どこまで重要かを説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Prompt Engineering</div><h1>Prompt Engineeringは「魔法の呪文」ではなく、仕事の条件を伝える設計</h1><p class="lead">目的、入力、制約、出力形式、確認方法をAIへ伝える技術です。モデル性能が上がっても、何を達成したいかが曖昧なら結果も曖昧になります。</p><section><h2>最低限入れるもの</h2><ul class="checklist"><li>目的: 何のための出力か。</li><li>材料: 何を根拠に使うか。</li><li>制約: やってはいけないこと。</li><li>出力: どんな形で欲しいか。</li><li>確認: 何を満たせば成功か。</li></ul></section><section><h2>例</h2><div class="callout">この3つの製品を比較して、最安を選ぶのではなく、持ち運びやすさと静音性を優先して1位を決めて。確認できない仕様は推測で埋めず、不明と書いて。</div><p>「おすすめ教えて」より、判断基準と不明時の扱いが明確です。</p></section><section><h2>Promptだけで全部解決しない</h2><p>長いタスク、外部ツール、複数文書、継続状態が絡むと、Prompt Engineeringだけでは足りません。その先にContext EngineeringやLoop Engineeringがあります。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="context-engineering.html">Context Engineering</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="ai-agents.html">AI Agent</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Prompt Engineeringを実験する — AIを学ぶ</title><meta name="description" content="Promptを感覚で直すのではなく、固定評価セットでA/B比較するハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Prompt Engineering</div><h1>Prompt Engineeringを「うまい文章」ではなく、測れる変更として扱う</h1><p class="lead">良いpromptは長いpromptとは限りません。目的、判断基準、禁止事項、出力契約を必要なだけ書き、固定した入力セットで変更前後を比べます。このページでは問い合わせ分類を題材に、v1とv2のpromptをA/Bテストします。</p><section><h2>完成するもの</h2><p>10件の問い合わせを <code>billing / account / delivery / other</code> に分類し、urgencyも返す小さなプログラムを作ります。評価するのは「JSONとして読めるか」「categoryが正しいか」「余計な文章を出さないか」です。</p></section><section><h2>1. 環境</h2><pre><code>python -m venv .venv
+.venv\Scripts\activate
+pip install openai
+set OPENAI_API_KEY=...
+</code></pre><p>APIモデルは環境変数 <code>OPENAI_MODEL</code> で差し替えられるようにします。</p></section><section><h2>2. 評価セットを先に作る</h2><p><code>prompt_ab.py</code>:</p><pre><code>CASES = [
+    ("二重に請求されています", "billing", True),
+    ("請求書をPDFでほしい", "billing", False),
+    ("パスワードを忘れました", "account", False),
+    ("アカウントを乗っ取られたかもしれない", "account", True),
+    ("荷物が予定日を過ぎても届かない", "delivery", True),
+    ("配送先住所を変更したい", "delivery", False),
+    ("料金プランについて知りたい", "billing", False),
+    ("メールアドレスを変えたい", "account", False),
+    ("商品ページが見づらい", "other", False),
+    ("こんにちは", "other", False),
+]
+</code></pre><p>promptを書く前に「何を正解とするか」を固定すると、都合のいい成功例だけを見て改善した気になるのを防げます。</p></section><section><h2>3. v1: 曖昧なprompt</h2><pre><code>PROMPT_V1 = """
+問い合わせを分類してください。
+categoryとurgencyをJSONで返してください。
+"""
+</code></pre><p>人間には意味が通じますが、category候補、urgencyの判断基準、JSON以外を禁止するかが曖昧です。</p></section><section><h2>4. v2: 判断契約を明示する</h2><pre><code>PROMPT_V2 = """
+あなたは問い合わせ分類器です。
+
+categoryは必ず次のどれか:
+- billing: 請求、料金、支払い、請求書
+- account: ログイン、パスワード、メール変更、アカウント安全性
+- delivery: 発送、到着、配送先、追跡
+- other: 上記以外
+
+urgentは、金銭被害・不正アクセス疑い・期限超過など、
+放置で被害が拡大する可能性が高い場合だけtrue。
+
+次のJSONだけを返す。説明文やMarkdownは禁止。
+{"category":"billing|account|delivery|other","urgent":true|false}
+"""
+</code></pre></section><section><h2>5. 同じ10件を両方へ流す</h2><pre><code>import json, os
+from openai import OpenAI
+
+client = OpenAI()
+MODEL = os.getenv("OPENAI_MODEL", "gpt-6-astra")
+
+
+def classify(prompt, text):
+    r = client.responses.create(
+        model=MODEL,
+        instructions=prompt,
+        input=text,
+    )
+    return r.output_text.strip()
+
+
+def evaluate(prompt):
+    valid_json = 0
+    category_ok = 0
+    urgent_ok = 0
+    rows = []
+
+    for text, expected_cat, expected_urgent in CASES:
+        raw = classify(prompt, text)
+        try:
+            obj = json.loads(raw)
+            valid_json += 1
+            cat_ok = obj.get("category") == expected_cat
+            urg_ok = obj.get("urgent") is expected_urgent
+            category_ok += int(cat_ok)
+            urgent_ok += int(urg_ok)
+            rows.append((text, raw, cat_ok, urg_ok))
+        except json.JSONDecodeError:
+            rows.append((text, raw, False, False))
+
+    n = len(CASES)
+    return {
+        "json_rate": valid_json / n,
+        "category_accuracy": category_ok / n,
+        "urgent_accuracy": urgent_ok / n,
+        "rows": rows,
+    }
+
+for name, prompt in [("v1", PROMPT_V1), ("v2", PROMPT_V2)]:
+    result = evaluate(prompt)
+    print(name, {k: v for k, v in result.items() if k != "rows"})
+    for row in result["rows"]:
+        if not row[2] or not row[3]:
+            print("  NG", row)
+</code></pre><p>1回の結果だけで差が小さい場合は、各caseを複数回実行してばらつきも見ます。生成AIは非決定的なので、10件×1回より10件×5回の方が安定性を判断しやすくなります。</p></section><section><h2>6. Promptを直す順番</h2><p>失敗ごとに原因を分けます。</p><div class="table-wrap"><table><thead><tr><th>失敗</th><th>先に直す場所</th></tr></thead><tbody><tr><td>JSONの前後に説明を書く</td><td>出力契約・Structured Outputs</td></tr><tr><td>billingとaccountを混同</td><td>分類境界とfew-shot例</td></tr><tr><td>urgentを何でもtrueにする</td><td>判断基準・反例</td></tr><tr><td>資料にない事実を補う</td><td>根拠範囲・不明時の挙動</td></tr><tr><td>長いタスク途中で目的を失う</td><td>PromptよりContext/Loop設計</td></tr></tbody></table></div></section><section><h2>7. Few-shotは「難しい境界」に使う</h2><p>例を大量に貼る前に、モデルが迷う境界だけ追加します。</p><pre><code>EXAMPLES = """
+例:
+入力: 料金が高いので退会したい
+出力: {"category":"billing","urgent":false}
+
+入力: 知らない端末からログイン通知が来た
+出力: {"category":"account","urgent":true}
+"""
+</code></pre><p>代表例より「間違えやすい反例」を入れる方が効く場合があります。</p></section><section><h2>8. Promptに書かない方がよいもの</h2><p>変化する大量データ、長い社内規定、ツール出力全部、過去ログ全部をpromptへ詰めると、重要な指示が埋もれます。必要な情報を必要な時だけ取得するのはContext Engineeringの範囲です。</p><p>また、本番promptは文字列を管理画面で手修正するだけにせず、コードと同様にversion管理し、fixtureとevalを一緒に変更するとrollbackしやすくなります。OpenAIの2026年のAPIガイドでもproduction promptをcode-managedにする方向が案内されています。</p></section><section><h2>9. 発展実験</h2><ul class="checklist"><li>v2を短く削り、精度が落ちない最小promptを探す。</li><li>few-shot 0 / 2 / 10件で精度と入力tokenを比較する。</li><li>別モデルでも同じ評価セットを流す。</li><li>JSON schemaによるStructured Outputsを使い、形式失敗をpromptから分離する。</li><li>誤分類だけを集め、回帰テストへ追加する。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://developers.openai.com/api/docs/guides/prompt-engineering">OpenAI — Prompt engineering</a></li><li><a href="https://developers.openai.com/api/docs/guides/prompting">OpenAI — Prompting</a></li><li><a href="context-engineering.html">Context Engineering</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="context-engineering.html">次: Context Engineering →</a></footer></main></body></html>
