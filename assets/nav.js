@@ -7,7 +7,10 @@
   const prefix = nested ? '../' : '';
 
   const brand = header.querySelector('.brand');
-  if (brand) brand.href = `${prefix}index.html`;
+  if (brand) {
+    brand.href = `${prefix}index.html`;
+    brand.textContent = 'AI活用ガイド';
+  }
 
   const nav = header.querySelector('.nav');
   if (!nav) return;
