@@ -1,1 +1,90 @@
-<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Evalsとは — AIを学ぶ</title><meta name="description" content="LLMアプリを同じ問題で繰り返し評価するEvalsの基本を説明する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Evals</div><h1>Evalsは「良くなった気がする」を、同じ問題で比較できる形へ変える</h1><p class="lead">モデル、Prompt、RAG、Tool、Agentの構成を変えたとき、数件のデモだけでは改善か悪化か判断できません。Evalsでは代表的な入力と期待条件を固定し、変更前後を繰り返し比較します。</p><section><h2>最小構成</h2><ol><li>実際に重要な入力を10〜50件集める。</li><li>何を満たせば合格か決める。</li><li>同じ条件で繰り返し実行する。</li><li>失敗を種類別に見る。</li><li>変更を1つ入れ、再実行する。</li></ol></section><section><h2>採点方法</h2><p>完全一致、数値、JSON schema、ルール判定、人間レビュー、別モデルgraderなどを組み合わせます。自由文では「自然か」だけでなく、事実、必要項目、禁止事項を分けて評価します。</p></section><section><h2>Agentでは最終回答だけ見ない</h2><p>Toolを正しく呼んだか、不要な副作用を起こしていないか、途中でループしていないかも評価します。Voice Agentなら会話の自然さとバックエンド操作の正しさを分けて見る必要があります。</p></section><section><h2>次に読む</h2><ul class="checklist"><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="llm-security.html">LLM Security</a></li><li><a href="https://developers.openai.com/learn/evals">OpenAI — Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Evalsを作る — AIを学ぶ</title><meta name="description" content="fixture、決定論grader、LLM grader、回帰テストまで小さな評価基盤を作るハンズオン。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">Learn · Evals</div><h1>AIの変更を「良くなった気がする」ではなく、同じ問題で比較する</h1><p class="lead">Prompt、モデル、RAG、Tool、Agentを変えるたびに目視で数件試すだけでは、改善か悪化か判断できません。このページではJSONLのfixtureとPythonのgraderを作り、変更前後のpass率を自動比較します。</p><section><h2>完成するもの</h2><pre><code>eval-lab/
+├─ cases.jsonl
+├─ app.py
+└─ eval.py
+</code></pre><p>題材は「問い合わせ分類」です。AIはcategory、urgent、reasonをJSONで返します。形式、category、urgentを決定論的に採点し、必要なら自由文reasonだけLLM graderへ回します。</p></section><section><h2>1. fixtureを作る</h2><p><code>cases.jsonl</code>:</p><pre><code>{"id":"billing-1","input":"身に覚えのない二重請求があります","category":"billing","urgent":true}
+{"id":"billing-2","input":"先月の請求書を再発行したい","category":"billing","urgent":false}
+{"id":"account-1","input":"知らない端末からログイン通知が来ました","category":"account","urgent":true}
+{"id":"account-2","input":"メールアドレスを変えたい","category":"account","urgent":false}
+{"id":"delivery-1","input":"予定日を3日過ぎても荷物が届かない","category":"delivery","urgent":true}
+{"id":"delivery-2","input":"配送先住所を変更したい","category":"delivery","urgent":false}
+{"id":"other-1","input":"サイトの文字を大きくしてほしい","category":"other","urgent":false}
+</code></pre><p>実運用で失敗した入力をここへ追加していくと、回帰テストになります。</p></section><section><h2>2. 評価対象のappを書く</h2><p><code>app.py</code>:</p><pre><code>import json, os
+from openai import OpenAI
+
+client = OpenAI()
+MODEL = os.getenv("OPENAI_MODEL", "gpt-6-astra")
+
+PROMPT = """
+問い合わせを分類する。
+category: billing | account | delivery | other
+urgent: 放置で金銭被害、安全性、期限超過の影響が拡大しそうならtrue。
+JSONだけ返す:
+{"category":"...","urgent":true,"reason":"..."}
+"""
+
+
+def predict(text):
+    r = client.responses.create(
+        model=MODEL,
+        instructions=PROMPT,
+        input=text,
+    )
+    return json.loads(r.output_text)
+</code></pre></section><section><h2>3. 決定論graderを書く</h2><p><code>eval.py</code>:</p><pre><code>import json
+from app import predict
+
+
+def load_cases():
+    with open("cases.jsonl", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def grade(case, output):
+    return {
+        "category": output.get("category") == case["category"],
+        "urgent": output.get("urgent") is case["urgent"],
+        "has_reason": isinstance(output.get("reason"), str) and len(output["reason"]) &gt; 0,
+    }
+
+
+def main():
+    rows = []
+    for case in load_cases():
+        try:
+            output = predict(case["input"])
+            scores = grade(case, output)
+        except Exception as e:
+            output = {"error": str(e)}
+            scores = {"category": False, "urgent": False, "has_reason": False}
+
+        rows.append((case, output, scores))
+        print(case["id"], scores, output)
+
+    for metric in ["category", "urgent", "has_reason"]:
+        rate = sum(r[2][metric] for r in rows) / len(rows)
+        print(metric, f"{rate:.1%}")
+
+
+if __name__ == "__main__":
+    main()
+</code></pre><pre><code>python eval.py
+</code></pre><p>まずは「何件通ったか」を再現できるようにするだけで、prompt変更の比較がかなり楽になります。</p></section><section><h2>4. 変更前後を保存する</h2><p>結果をJSONへ保存し、commitごとに比較します。</p><pre><code>results = {
+    "model": MODEL,
+    "prompt_version": "v3",
+    "scores": {...},
+    "failures": [...]
+}
+</code></pre><p>モデル名、prompt version、dataset versionを残さないと、後から「なぜ数字が変わったか」を追えません。</p></section><section><h2>5. 平均点だけでなく失敗カテゴリを見る</h2><p>90%→92%になっても、重要なsecurity caseだけ悪化していたら採用できません。caseへtagを付けます。</p><pre><code>{"id":"account-1","tags":["security","urgent"], ...}
+</code></pre><p>tag別にpass率を出すと、「全体は改善したがsecurityは悪化」のような変化が見えます。</p></section><section><h2>6. 非決定性を扱う</h2><p>同じ入力でも出力が揺れる場合は、各caseを複数回流します。</p><pre><code>RUNS = 5
+
+for case in cases:
+    pass_count = 0
+    for _ in range(RUNS):
+        out = predict(case["input"])
+        pass_count += int(grade(case, out)["category"])
+    print(case["id"], pass_count / RUNS)
+</code></pre><p>「5回中5回通る」のと「5回中3回通る」は、1回だけ見ればどちらも成功に見えることがあります。</p></section><section><h2>7. LLM graderは最後の手段ではなく、適材適所</h2><p>自由文の「分かりやすさ」「根拠の十分性」のようにルール化しにくい部分は、LLM graderを使えます。ただしgraderもモデルなので、grader自身を評価します。</p><p>まず20〜50件だけ人間が採点し、そのhuman labelとLLM graderの一致率を確認します。重要判定をgrader一発で自動承認しない方が安全です。</p></section><section><h2>8. Agentではtrajectoryも評価する</h2><p>最終回答だけ合っていても、危険なToolを呼んだり、無駄なloopを10回回していたら問題です。Agent evalでは次も記録します。</p><ul class="checklist"><li>正しいToolを使ったか。</li><li>Tool引数が正しいか。</li><li>書き込み前に承認を取ったか。</li><li>不要なToolを何回呼んだか。</li><li>最終的なDB/ファイル状態が正しいか。</li><li>max turn内で終了したか。</li></ul></section><section><h2>9. Voice Agentは会話とtask outcomeを分ける</h2><p>音声Agentは声が自然でも、裏側の予約や検索を間違えることがあります。会話品質、聞き取り、delegation、Tool実行、最終外部状態、ユーザーへの伝達を別々に測ります。OpenAIの2026年のVoice Agent評価ガイドも、transcriptや最終発話だけでは不十分としています。</p></section><section><h2>10. Holdoutを作る</h2><p>実装Agent自身が見ている10ケースだけに最適化すると、テストを満たすだけの挙動になることがあります。開発用fixtureと、最終判定用holdoutを分けます。</p><pre><code>eval/
+├─ dev.jsonl       # 開発中に見える
+└─ holdout.jsonl   # 最終評価だけで使う
+</code></pre></section><section><h2>11. Evals APIの現在</h2><p>2026年10月時点でOpenAIは従来のEvals platformを廃止移行中で、既存Evalsは10月31日にread-only、11月30日に終了予定と案内しています。新規の評価設計では、製品固有APIだけに依存せず、fixtureとgraderの考え方を自分のコード側にも残すと移行しやすくなります。</p></section><section><h2>12. 発展課題</h2><ul class="checklist"><li>prompt v1/v2を自動で両方実行してdiff reportを出す。</li><li>latency、token、API費用もmetricへ追加する。</li><li>RAGならretrieval recallとanswer correctnessを分ける。</li><li>AgentならTool trajectoryをJSONへ保存する。</li><li>CIで重要caseが悪化したらmergeを止める。</li></ul></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://developers.openai.com/api/docs/guides/evals">OpenAI — Working with evals</a></li><li><a href="https://developers.openai.com/cookbook/examples/audio/voice_agent_evaluation">OpenAI — Voice Agent evaluation guide</a></li><li><a href="prompt-engineering.html">Prompt Engineering</a></li><li><a href="rag.html">RAG</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a></footer></main></body></html>
