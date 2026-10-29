@@ -1,0 +1,16 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI自動化は固定プロンプトで終わらない。実際の採否を次の改善材料にする — AI活用ガイド</title><meta name="description" content="Copilot Automationsのself-improvementを題材に、運用結果から自動化を改善するfeedback loopを解説する。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">2026-10-29 · 開発 · 自動化</div><h1>AI自動化は固定プロンプトで終わらない。実際の採否を次の改善材料にする</h1><p class="lead">定期Agentは、最初に良いpromptを書いて終わりではありません。GitHub Copilot Automationsでは、ラベルの修正、レビューコメントの採否、PRがmergeされたかといった実運用の結果を読み、prompt・tool・triggerの改善案を出すself-improvement loopが提供されました。</p><section><h2>改善に使うのは「モデルの自己評価」ではなく結果</h2><p>issue triageなら、人間が後からラベルを直したか。code reviewなら、指摘が受け入れられたか。最適化Agentなら、作ったPRがmergeされたか。このような外部結果は、Agent自身に「今回よかった？」と聞くより運用品質へ近い信号です。</p><div class="callout">実行Agent → GitHub上に結果を残す → 一定期間の採否を集計 → 改善Agentが変更案を作る → 人間がreview → 採用された変更だけ次回へ反映</div></section><section><h2>自動改善まで自動承認しない</h2><p>GitHubの仕組みでも、改善案は人間へ提示され、承認されるまで元のautomationへ適用されません。これは重要な境界です。実行結果からpromptを変える仕組みは便利ですが、偏った短期指標へ過適応したり、安全条件を弱めたりする可能性があります。</p><p>特に「mergeされた」を唯一の成功指標にすると、小さく安全な変更よりmergeされやすい変更へ最適化する可能性があります。品質、revert、障害、review時間など複数の信号を持たせます。</p></section><section><h2>自前Agentにも同じループを作れる</h2><p>自動改善機能がない環境でも、実行ログとoutcomeを保存して週次で分析できます。変更案は直接promptへ書き戻さずdiffとして出し、golden setで回帰評価してから採用します。</p><pre><code>runs.jsonl
+  task_id
+  prompt_version
+  tools_used
+  result
+  accepted
+  human_correction
+  cost
+  latency
+
+weekly_improvement:
+  1. failuresを分類
+  2. prompt/tool/triggerの変更案を作る
+  3. holdout evalを実行
+  4. 改善と回帰を比較
+  5. 人間が採否を決める</code></pre></section><section><h2>共有自動化は個人アカウントからリポジトリ資産へ</h2><p>同日の更新でShared Copilot Automationsも展開され、workflowをrepositoryに所属させ、teamで編集し、実行をCopilot名義にし、作成者が離れても継続できるようになりました。個人の「便利な定期prompt」から、変更履歴と所有者を持つ運用資産へ近づいています。</p><p>さらに外部API trigger、automation同士のchain、custom MCP tools、run/day/week/month単位のAI credit上限も追加されています。長期運用ではpromptだけでなく、権限・予算・trigger・変更履歴まで一緒にversion管理する方が安全です。</p></section><section><h2>根拠と限界</h2><ul class="checklist"><li><a href="https://github.blog/changelog/2026-10-28-copilot-automations-now-learn-from-outcomes-and-self-improve/">GitHub — Copilot Automations now learn from outcomes and self-improve</a>。</li><li><a href="https://github.blog/changelog/2026-10-28-build-shared-workflows-for-your-team-with-copilot-automations/">GitHub — Build shared workflows for your team with Copilot Automations</a>。</li><li><a href="https://github.blog/changelog/2026-10-28-new-tools-triggers-and-cost-controls-for-copilot-automations/">GitHub — New tools, triggers, and cost controls for Copilot Automations</a>。</li></ul><p>製品機能の一次情報であり、「self-improvementを入れると一般に品質が何%上がる」といった独立評価はまだありません。</p></section><section><h2>ガイドへの反映</h2><p><a href="../everyday/automation.html">自動化ガイド</a>へ、実行後の採否を保存して定期的に改善するfeedback loopを追加しました。</p></section><footer><a href="../articles.html">← 最新記事</a> · <a href="../everyday/automation.html">自動化ガイド</a></footer></main></body></html>
