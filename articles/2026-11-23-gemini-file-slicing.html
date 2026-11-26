@@ -1,0 +1,53 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDFや表計算は全部読ませず、必要な範囲だけ高解像度で見る — AI活用ガイド</title><meta name="description" content="Gemini APIのfile slicingでPDF、Office、表計算、動画、音声の必要範囲だけを処理する方法。"><link rel="stylesheet" href="../assets/style.css"><script src="../assets/nav.js" defer></script></head><body><header class="site-header"><div class="header-inner"><a class="brand" href="../index.html">AI活用ガイド</a><nav class="nav"></nav></div></header><main><div class="eyebrow">2026-11-23 · Context Engineering</div><h1>PDFや表計算は全部読ませず、必要な範囲だけ高解像度で見る</h1><p class="lead">長いPDFやスライドを毎回まるごと画像として渡す必要はありません。Gemini APIのfile slicingでは、ページ範囲、シートとセル範囲、動画・音声の時間区間、抽出するレイヤーや解像度を指定し、必要な部分だけをモデルへ渡せます。</p><section><h2>「全文を読む」から「安く全体を探し、必要箇所だけ拡大する」へ</h2><p>2026年11月23日、GoogleはGemini APIにserver-side file slicingを追加しました。Files APIへ一度アップロードしたファイルURIを複数のリクエストで再利用し、最初はPDFの抽出テキストや低解像度の情報で対象ページを探し、次にグラフや脚注があるページだけ高解像度の画像として確認できます。</p><p>ドキュメント・スライドでは <code>start_page</code> / <code>end_page</code> と <code>page_text</code> / <code>page_image</code> を選べます。表計算では <code>sheet_index</code> と <code>visible_cells</code>、動画では開始・終了時刻、fps、解像度、transcript / frames / audioなどのcontent layerを指定できます。</p></section><section><h2>実装イメージ</h2><p>同じPDF URIを使い、1回目は全文のテキストレイヤーだけで対象ページを探し、2回目はそのページ画像をhigh resolutionで読みます。ファイル全体を再アップロードする必要はありません。</p><pre><code>from google import genai
+
+client = genai.Client()
+doc = client.files.upload(file="quarterly_report.pdf")
+
+# 1. 全ページの抽出テキストから、目的のページを探す
+skim = client.interactions.create(
+    model="gemini-4-hydrogen",
+    input=[
+        {
+            "type": "document",
+            "uri": doc.uri,
+            "mime_type": doc.mime_type,
+            "processing": {
+                "type": "static",
+                "page_options": {"content_layers": ["page_text"]},
+            },
+        },
+        {
+            "type": "text",
+            "text": "売上のrevenue bridge chartがあるページ番号と見出しを答えて。",
+        },
+    ],
+)
+print(skim.output_text)
+
+# 2. 返されたページ番号を使い、必要なページだけ画像として読む
+page = 3  # 1-indexed。skimの結果に合わせて変更する
+
+detail = client.interactions.create(
+    model="gemini-4-hydrogen",
+    input=[
+        {
+            "type": "document",
+            "uri": doc.uri,
+            "mime_type": doc.mime_type,
+            "resolution": "high",
+            "processing": {
+                "type": "static",
+                "page_options": {
+                    "start_page": page,
+                    "end_page": page,
+                    "content_layers": ["page_image"],
+                },
+            },
+        },
+        {
+            "type": "text",
+            "text": "このページのグラフの数値、注記、脚注を読み取り、本文の説明と矛盾がないか整理して。",
+        },
+    ],
+)
+print(detail.output_text)</code></pre><p>必要なパッケージは <code>pip install --upgrade google-genai</code>。Google AI StudioでGemini API keyを作り、環境変数 <code>GEMINI_API_KEY</code> に設定します。コードはGoogle公式のPython SDK例を基にしています。</p></section><section><h2>解像度とcontent layerを使い分ける</h2><ul class="checklist"><li><strong>page_text:</strong> 見出し、本文、抽出可能な文字を探す。全体のスキャンに向く。</li><li><strong>page_image:</strong> 図表、レイアウト、脚注、画像内文字を確認する。必要なページだけhigh resolutionへ上げる。</li><li><strong>low / medium / high:</strong> 公式ドキュメントの目安では、ページ画像のtoken量はlowが約280、mediumが約560、highが約1,120 token/ページ。</li><li><strong>spreadsheet:</strong> sheetとcell rangeを絞り、data・formulas・visualsのどれを読むか指定する。</li></ul><p>Geminiは指定したsliceだけをtoken計上・課金対象にします。Files APIへアップロードするファイル自体のサイズ・ページ上限は残るため、無制限に大きな資料を送れるという意味ではありません。</p></section><section><h2>正常確認と失敗時の見方</h2><ul class="checklist"><li>最初の出力に、探しているページ番号と見出しが出る。</li><li>2回目の出力が指定ページのグラフや脚注を根拠に説明している。</li><li>ページ番号は1始まり。0以下はinvalid argument、ファイル末尾より先の範囲は空のsliceになり得る。</li><li><code>end_page</code> は <code>start_page</code> 以上にする。</li><li>グラフが読めないときはpage_imageとhigh resolutionを指定し、テキスト抽出だけで判断しない。</li></ul><p>Files APIのアップロードファイルは48時間保存されます。機密文書を扱う場合は、アップロード先、組織のデータ取扱条件、削除・保存の要件を確認してください。</p></section><section><h2>どこまで使うべきか</h2><p>ファイルが小さく、質問が単純なら全文を一度送る方が簡単です。大きな資料、複数回質問する資料、図表が一部にしかない資料では、skim → zoomの方がcontextとtokenを制御しやすくなります。検索で見つけたページが正しいとは限らないため、該当ページの前後や脚注を追加確認する評価も残します。</p><p>このAPI機能はGemini API / Google AI Studio / Gemini platform向けです。一般向けGeminiアプリに同じ処理設定があるという意味ではありません。</p></section><section><h2>根拠</h2><ul class="checklist"><li><a href="https://blog.google/innovation-and-ai/technology/developers-tools/file-slicing-controls/">Google — Introducing file slicing controls in the Gemini API</a>（2026年11月23日）。対応ファイル、slice設定、公式例。</li><li><a href="https://aistudio.google.com/docs/document-processing#customize-document-processing">Gemini API — Customize document processing</a>。page range、content layer、解像度、Files APIの仕様。</li><li><a href="../learn/context-engineering.html">Context Engineeringの実験と実装</a></li></ul></section><footer><a href="../articles.html">← 最新記事</a> · <a href="../learn/context-engineering.html">Context Engineering</a></footer></main></body></html>
