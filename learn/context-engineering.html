@@ -111,4 +111,63 @@ for mode, builder in [("all", stuff_all), ("jit", just_in_time)]:
 </code></pre><p>会話は圧縮しても、この状態ファイルはそのまま残せます。Anthropicが長時間Agent向けに挙げているcompaction、structured memory、sub-agent architectureも、Contextを有限資源として扱う同じ発想です。</p></section><section><h2>9. Tool定義もContextを使う</h2><p>100個のTool schemaを毎回モデルへ見せると、入力tokenだけでなく選択肢も増えます。常時必要なToolと、必要時に探索するToolを分けます。</p><p>例:</p><pre><code>通常: search_docs, read_file, save_note
 DB作業を検知したら追加: schema, query_readonly
 デプロイ作業を検知したら追加: ci_status, deploy_preview
-</code></pre><p>「使える能力を増やす」と「常に全能力をContextへ入れる」は別問題です。</p></section><section><h2>10. Sub-AgentはContext分離にも使える</h2><p>補助Agentの利点は並列化だけではありません。巨大なログ調査を別Agentに渡し、主Agentへ「重要な5件＋原文参照」だけ返せば、主Contextを汚さず探索できます。</p><p>ただし要約だけ残すと証拠が消えるので、元ファイル、行番号、URL、tool result IDなどへ戻れる参照を持たせます。</p></section><section><h2>11. Context設計の失敗パターン</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>疑う場所</th></tr></thead><tbody><tr><td>長くなるほど指示を忘れる</td><td>会話履歴・重複資料・古いログの詰め込み</td></tr><tr><td>古い仕様を使う</td><td>正本metadata、retrieval filter</td></tr><tr><td>Tool選択をよく間違える</td><td>Tool数、schema名、説明、遅延ロード</td></tr><tr><td>compact後に条件が落ちる</td><td>重要状態を会話外へ保存しているか</td></tr><tr><td>sub-agentの結論を検証できない</td><td>要約だけでなく原データ参照を残しているか</td></tr><tr><td>入力tokenだけ下げたら精度も落ちた</td><td>削りすぎ。成功率との両方で評価する</td></tr></tbody></table></div></section><section><h2>12. 実運用で測る指標</h2><p>Context Engineeringを「token削減テクニック」だけにすると失敗します。少なくとも次を同時に見ます。</p><ul class="checklist"><li>task success rate</li><li>入力token / 成功1件</li><li>retrieval hit rate</li><li>誤った古い資料の参照率</li><li>tool選択ミス</li><li>再試行回数</li><li>人間の修正時間</li></ul><p>JIT retrievalでtokenが半分になっても、正答率が落ちて再試行が倍なら改善とは言えません。</p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents">Anthropic — Effective context engineering for AI agents</a>。Contextを有限資源として扱い、just-in-time retrieval、compaction、structured memory、sub-agentなどを整理。</li><li><a href="../context.html">実務ガイド: コンテキスト設計</a></li><li><a href="rag.html">RAG</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="loop-engineering.html">次: Loop Engineering →</a></footer></main></body></html>
+</code></pre><p>「使える能力を増やす」と「常に全能力をContextへ入れる」は別問題です。</p></section><section><h2>10. Sub-AgentはContext分離にも使える</h2><p>補助Agentの利点は並列化だけではありません。巨大なログ調査を別Agentに渡し、主Agentへ「重要な5件＋原文参照」だけ返せば、主Contextを汚さず探索できます。</p><p>ただし要約だけ残すと証拠が消えるので、元ファイル、行番号、URL、tool result IDなどへ戻れる参照を持たせます。</p></section><section><h2>11. Context設計の失敗パターン</h2><div class="table-wrap"><table><thead><tr><th>症状</th><th>疑う場所</th></tr></thead><tbody><tr><td>長くなるほど指示を忘れる</td><td>会話履歴・重複資料・古いログの詰め込み</td></tr><tr><td>古い仕様を使う</td><td>正本metadata、retrieval filter</td></tr><tr><td>Tool選択をよく間違える</td><td>Tool数、schema名、説明、遅延ロード</td></tr><tr><td>compact後に条件が落ちる</td><td>重要状態を会話外へ保存しているか</td></tr><tr><td>sub-agentの結論を検証できない</td><td>要約だけでなく原データ参照を残しているか</td></tr><tr><td>入力tokenだけ下げたら精度も落ちた</td><td>削りすぎ。成功率との両方で評価する</td></tr></tbody></table></div></section><section><h2>12. 実運用で測る指標</h2><p>Context Engineeringを「token削減テクニック」だけにすると失敗します。少なくとも次を同時に見ます。</p><ul class="checklist"><li>task success rate</li><li>入力token / 成功1件</li><li>retrieval hit rate</li><li>誤った古い資料の参照率</li><li>tool選択ミス</li><li>再試行回数</li><li>人間の修正時間</li></ul><p>JIT retrievalでtokenが半分になっても、正答率が落ちて再試行が倍なら改善とは言えません。</p></section><section><h2>13. 大きな資料は「全体を軽く見て、必要箇所だけ拡大する」</h2><p>Gemini APIのfile slicingは、PDFやOffice文書を毎回まるごと画像として読ませず、ページ範囲やcontent layerを指定して処理します。まず全ページの抽出テキストで対象を探し、グラフや脚注があるページだけ高解像度の画像として読み直せます。同じFiles API URIを複数回使えるため、ファイル転送を繰り返す必要もありません。</p><p>以下はPDFを1度アップロードし、テキストでページを探してから、指定した1ページを高解像度で読む最小例です。Gemini API keyと課金対象のAPI利用が必要です。</p><pre><code>python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade google-genai
+export GEMINI_API_KEY="YOUR_API_KEY"
+</code></pre><p>Windows PowerShellでは <code>$env:GEMINI_API_KEY="YOUR_API_KEY"</code> を設定します。次を <code>slice_pdf.py</code> として保存し、同じフォルダへ <code>quarterly_report.pdf</code> を置きます。</p><pre><code>from google import genai
+
+client = genai.Client()
+doc = client.files.upload(file="quarterly_report.pdf")
+
+# 全ページの抽出テキストだけを読み、目的のページを探す
+skim = client.interactions.create(
+    model="gemini-4-hydrogen",
+    input=[
+        {
+            "type": "document",
+            "uri": doc.uri,
+            "mime_type": doc.mime_type,
+            "processing": {
+                "type": "static",
+                "page_options": {"content_layers": ["page_text"]},
+            },
+        },
+        {
+            "type": "text",
+            "text": "売上のrevenue bridge chartがあるページ番号と見出しを答えて。ページ番号は1始まりで示して。",
+        },
+    ],
+)
+print("=== skim ===")
+print(skim.output_text)
+
+# 上の結果を見て、対象ページ番号へ変更する
+page = 3
+
+detail = client.interactions.create(
+    model="gemini-4-hydrogen",
+    input=[
+        {
+            "type": "document",
+            "uri": doc.uri,
+            "mime_type": doc.mime_type,
+            "resolution": "high",
+            "processing": {
+                "type": "static",
+                "page_options": {
+                    "start_page": page,
+                    "end_page": page,
+                    "content_layers": ["page_image"],
+                },
+            },
+        },
+        {
+            "type": "text",
+            "text": "このページのグラフの数値、注記、脚注を読み取り、本文の説明と矛盾がないか整理して。",
+        },
+    ],
+)
+print("=== detail ===")
+print(detail.output_text)
+</code></pre><p>実行は <code>python slice_pdf.py</code>。最初の出力にあるページ番号を <code>page</code> へ反映して再実行します。正常なら、2回目は指定ページのグラフや脚注を根拠に説明します。</p><p><code>page_text</code> は見出しや本文の探索に向きますが、画像化されたグラフや複雑なレイアウトは取りこぼします。その場合は <code>page_image</code> と <code>resolution: high</code> を指定します。公式の目安ではページ画像のtoken量はlow約280、medium約560、high約1,120 token/ページです。Geminiは指定sliceだけをtoken計上・課金対象にします。</p><p>ページ番号は1始まりです。0以下はエラー、ファイル末尾より先の範囲は空のsliceになり得ます。<code>end_page</code> は <code>start_page</code> 以上にします。Files APIにアップロードしたファイルは48時間保存されます。機密資料では組織のデータ取扱条件を確認してください。PDF以外にもOffice / OpenDocument、表計算のsheet・cell range、動画・音声の時間区間に対応します。</p><p>これはGemini API向けの開発機能であり、一般向けGeminiアプリに同じslice設定があるという意味ではありません。小さな資料なら全文を渡す方が簡単です。大きな資料や複数回質問する資料で、skim → zoomを比較してみてください。</p><p><a href="../articles/2026-11-23-gemini-file-slicing.html">file slicingの設計と仕様を詳しく読む →</a></p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents">Anthropic — Effective context engineering for AI agents</a>。Contextを有限資源として扱い、just-in-time retrieval、compaction、structured memory、sub-agentなどを整理。</li><li><a href="../context.html">実務ガイド: コンテキスト設計</a></li><li><a href="rag.html">RAG</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="loop-engineering.html">次: Loop Engineering →</a></footer></main></body></html>
