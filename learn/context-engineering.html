@@ -170,4 +170,28 @@ detail = client.interactions.create(
 )
 print("=== detail ===")
 print(detail.output_text)
-</code></pre><p>実行は <code>python slice_pdf.py</code>。最初の出力にあるページ番号を <code>page</code> へ反映して再実行します。正常なら、2回目は指定ページのグラフや脚注を根拠に説明します。</p><p><code>page_text</code> は見出しや本文の探索に向きますが、画像化されたグラフや複雑なレイアウトは取りこぼします。その場合は <code>page_image</code> と <code>resolution: high</code> を指定します。公式の目安ではページ画像のtoken量はlow約280、medium約560、high約1,120 token/ページです。Geminiは指定sliceだけをtoken計上・課金対象にします。</p><p>ページ番号は1始まりです。0以下はエラー、ファイル末尾より先の範囲は空のsliceになり得ます。<code>end_page</code> は <code>start_page</code> 以上にします。Files APIにアップロードしたファイルは48時間保存されます。機密資料では組織のデータ取扱条件を確認してください。PDF以外にもOffice / OpenDocument、表計算のsheet・cell range、動画・音声の時間区間に対応します。</p><p>これはGemini API向けの開発機能であり、一般向けGeminiアプリに同じslice設定があるという意味ではありません。小さな資料なら全文を渡す方が簡単です。大きな資料や複数回質問する資料で、skim → zoomを比較してみてください。</p><p><a href="../articles/2026-11-23-gemini-file-slicing.html">file slicingの設計と仕様を詳しく読む →</a></p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents">Anthropic — Effective context engineering for AI agents</a>。Contextを有限資源として扱い、just-in-time retrieval、compaction、structured memory、sub-agentなどを整理。</li><li><a href="../context.html">実務ガイド: コンテキスト設計</a></li><li><a href="rag.html">RAG</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="loop-engineering.html">次: Loop Engineering →</a></footer></main></body></html>
+</code></pre><p>実行は <code>python slice_pdf.py</code>。最初の出力にあるページ番号を <code>page</code> へ反映して再実行します。正常なら、2回目は指定ページのグラフや脚注を根拠に説明します。</p><p><code>page_text</code> は見出しや本文の探索に向きますが、画像化されたグラフや複雑なレイアウトは取りこぼします。その場合は <code>page_image</code> と <code>resolution: high</code> を指定します。公式の目安ではページ画像のtoken量はlow約280、medium約560、high約1,120 token/ページです。Geminiは指定sliceだけをtoken計上・課金対象にします。</p><p>ページ番号は1始まりです。0以下はエラー、ファイル末尾より先の範囲は空のsliceになり得ます。<code>end_page</code> は <code>start_page</code> 以上にします。Files APIにアップロードしたファイルは48時間保存されます。機密資料では組織のデータ取扱条件を確認してください。PDF以外にもOffice / OpenDocument、表計算のsheet・cell range、動画・音声の時間区間に対応します。</p><p>これはGemini API向けの開発機能であり、一般向けGeminiアプリに同じslice設定があるという意味ではありません。小さな資料なら全文を渡す方が簡単です。大きな資料や複数回質問する資料で、skim → zoomを比較してみてください。</p><p><a href="../articles/2026-11-23-gemini-file-slicing.html">file slicingの設計と仕様を詳しく読む →</a></p></section><section><h2>14. Tool schemaも必要時に読み込む</h2><p>Tool定義はContextの一部です。数十〜数百のTool schemaを毎回送ると、入力tokenだけでなく選択候補も増えます。Gemini APIのTool Retrieval previewでは、名前と説明だけを候補として残し、詳細parameter schemaを選択時に読み込めます。</p><p>最小例は次の通りです。Interactions APIの <code>v1beta</code> が必要で、Gemini API keyを <code>GEMINI_API_KEY</code> に設定します。</p><pre><code>from google import genai
+
+client = genai.Client(http_options={"api_version": "v1beta"})
+tools = [
+    {"type": "tool_search"},
+    {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order by its public order ID.",
+        "defer_loading": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    },
+]
+interaction = client.interactions.create(
+    model="gemini-4-hydrogen",
+    input="注文 A-1042 の配送状況を確認して。",
+    tools=tools,
+)
+for step in interaction.steps:
+    print(step.type, getattr(step, "name", ""), getattr(step, "arguments", ""))
+</code></pre><p>正常なら <code>tool_search_call</code>、<code>tool_search_result</code>、<code>function_call</code> が順に観察できます。APIはschemaを読み込むところまでを担当し、実際の注文検索はアプリ側で認証・認可して実行します。結果は <code>function_result</code> として返します。</p><p>Server-side retrievalは追加round tripなしで、remote MCP serverのToolも遅延ロードできます。Client-side retrievalは独自registryやユーザー別権限filterを使えますが、検索ごとにround tripが増えます。20未満の小さなTool集合ではstatic loadingが安いこともあります。</p><p>Tool Retrievalはpreviewで、Interactions APIの <code>v1beta</code> 専用です。検索用tokenと取得schemaは課金対象になり、tool-use tokenもusageに現れます。通常のinput token、tool-use token、latency、Tool選択精度を同じfixtureで比較し、実際に使わないToolが多い場合だけ遅延ロードの効果を判断します。</p><p><a href="../articles/2026-11-19-gemini-tool-retrieval.html">Tool Retrievalを使った動作例と料金の詳細 →</a> · <a href="../tools-mcp.html">ToolとMCPの実務ガイド</a></p></section><section><h2>資料</h2><ul class="checklist"><li><a href="https://www.anthropic.com/research/effective-context-engineering-for-ai-agents">Anthropic — Effective context engineering for AI agents</a>。Contextを有限資源として扱い、just-in-time retrieval、compaction、structured memory、sub-agentなどを整理。</li><li><a href="../context.html">実務ガイド: コンテキスト設計</a></li><li><a href="rag.html">RAG</a></li><li><a href="loop-engineering.html">Loop Engineering</a></li><li><a href="evals.html">Evals</a></li></ul></section><footer><a href="../learn.html">← AIを学ぶ</a> · <a href="loop-engineering.html">次: Loop Engineering →</a></footer></main></body></html>
